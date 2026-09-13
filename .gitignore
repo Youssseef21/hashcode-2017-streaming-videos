@@ -1,0 +1,13 @@
+# Generated / derived
+__pycache__/
+*.pyc
+*.out
+
+# Official Hash Code instances (large, not required to run the solver)
+kittens.in
+trending_today.in
+videos_worth_spreading.in
+
+# Older explanation PDFs (replaced by compte_rendu.pdf)
+explication_du_code.pdf
+explication_nouveau_main.pdf
