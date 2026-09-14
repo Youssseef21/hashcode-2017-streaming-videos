@@ -55,55 +55,6 @@ def _aggregate_requests(requests):
     return counts, video_reqs
 
 
-def _knapsack_select(items, capacity):
-    """0/1 knapsack. items = (value, size, video_id). Returns chosen video ids."""
-    n = len(items)
-    if n == 0 or capacity <= 0:
-        return []
-
-    def greedy():
-        ordered = sorted(
-            items,
-            key=lambda item: item[0] / item[1] if item[1] else item[0],
-            reverse=True,
-        )
-        chosen = []
-        left = capacity
-        for value, size, video_id in ordered:
-            if 0 < size <= left:
-                chosen.append(video_id)
-                left -= size
-        return chosen
-
-    # DP uses O(n * capacity) memory. A large X can exceed the judge
-    # memory limit and be reported as SIGSEGV / internal error.
-    if capacity > 20_000 or n * capacity > 1_500_000:
-        return greedy()
-
-    dp = [0] * (capacity + 1)
-    chose = [bytearray(capacity + 1) for _ in range(n)]
-
-    for i, (value, size, video_id) in enumerate(items):
-        if size > capacity:
-            continue
-        row = chose[i]
-        for weight in range(capacity, size - 1, -1):
-            new_value = dp[weight - size] + value
-            if new_value > dp[weight]:
-                dp[weight] = new_value
-                row[weight] = 1
-
-    weight = max(range(capacity + 1), key=lambda w: dp[w])
-    chosen = []
-    for i in range(n - 1, -1, -1):
-        if chose[i][weight]:
-            value, size, video_id = items[i]
-            chosen.append(video_id)
-            weight -= size
-
-    return chosen
-
-
 def _solve_large(C, capacity, video_sizes, endpoints, requests, verbose=False, time_limit=8.5):
     """
     Fast cache-by-cache fill for huge instances (kittens).
@@ -234,9 +185,8 @@ def solve(C, capacity, video_sizes, endpoints, requests, verbose=False):
     Incremental greedy with marginal latency gain.
 
     Only the fastest cache that already holds a video counts, so each
-    placement must be scored against the current best latency — not against
-    the datacenter. After the greedy pass, each cache is re-solved as a
-    knapsack given the other caches.
+    placement is scored against the current best latency — not against
+    the datacenter.
     """
     counts, video_reqs = _aggregate_requests(requests)
 
@@ -248,18 +198,6 @@ def solve(C, capacity, video_sizes, endpoints, requests, verbose=False):
                 return _solve_large(
                     C, capacity, video_sizes, endpoints, requests, verbose=verbose
                 )
-
-    small_instance = C <= 20 and len(video_sizes) <= 200
-    use_global_greedy = True
-
-    endpoint_videos = [[] for _ in range(len(endpoints))]
-    for (video_id, endpoint_id), count in counts.items():
-        endpoint_videos[endpoint_id].append((video_id, count))
-
-    cache_endpoints = [[] for _ in range(C)]
-    for endpoint_id, endpoint in enumerate(endpoints):
-        for cache_id, latency in endpoint["caches"].items():
-            cache_endpoints[cache_id].append((endpoint_id, latency))
 
     current_best = {
         (video_id, endpoint_id): endpoints[endpoint_id]["datacenter_latency"]
@@ -278,15 +216,6 @@ def solve(C, capacity, video_sizes, endpoints, requests, verbose=False):
             if latency < current_best[key]:
                 current_best[key] = latency
 
-    def recompute_best_for_video(video_id):
-        for endpoint_id, count in video_reqs.get(video_id, ()):
-            endpoint = endpoints[endpoint_id]
-            best = endpoint["datacenter_latency"]
-            for other_id, other_latency in endpoint["caches"].items():
-                if video_id in cache_videos[other_id] and other_latency < best:
-                    best = other_latency
-            current_best[video_id, endpoint_id] = best
-
     def place(cache_id, video_id):
         if video_id in cache_videos[cache_id]:
             return
@@ -297,273 +226,73 @@ def solve(C, capacity, video_sizes, endpoints, requests, verbose=False):
         remaining[cache_id] -= size
         apply_best_updates(cache_id, video_id)
 
-    def cache_items(cache_id):
-        benefits = defaultdict(int)
-        present = cache_videos[cache_id]
-        for endpoint_id, latency in cache_endpoints[cache_id]:
-            for video_id, count in endpoint_videos[endpoint_id]:
-                if video_id in present:
-                    continue
-                best = current_best[video_id, endpoint_id]
-                if latency < best:
-                    benefits[video_id] += (best - latency) * count
+    initial_benefit = defaultdict(int)
+    for (video_id, endpoint_id), count in counts.items():
+        endpoint = endpoints[endpoint_id]
+        datacenter_latency = endpoint["datacenter_latency"]
+        for cache_id, cache_latency in endpoint["caches"].items():
+            saved = datacenter_latency - cache_latency
+            if saved > 0:
+                initial_benefit[cache_id, video_id] += saved * count
 
-        items = []
-        room = remaining[cache_id]
-        for video_id, benefit in benefits.items():
-            size = video_sizes[video_id]
-            if benefit > 0 and size <= room:
-                items.append((benefit, size, video_id))
-        return items
+    heap = []
+    for (cache_id, video_id), benefit in initial_benefit.items():
+        size = video_sizes[video_id]
+        if size <= 0 or size > capacity or benefit <= 0:
+            continue
+        heap.append((-benefit / size, cache_id, video_id, benefit))
+    heapq.heapify(heap)
 
-    def fill_cache(cache_id):
-        items = cache_items(cache_id)
-        for video_id in _knapsack_select(items, remaining[cache_id]):
-            place(cache_id, video_id)
+    if verbose:
+        print(f"  greedy: {len(heap):,} candidats", file=sys.stderr, flush=True)
 
-    demand = [0] * C
-    for endpoint_id, videos in enumerate(endpoint_videos):
-        request_sum = sum(count for _video_id, count in videos)
-        for cache_id in endpoints[endpoint_id]["caches"]:
-            demand[cache_id] += request_sum
-
-    if use_global_greedy:
-        initial_benefit = defaultdict(int)
-        for (video_id, endpoint_id), count in counts.items():
-            endpoint = endpoints[endpoint_id]
-            datacenter_latency = endpoint["datacenter_latency"]
-            for cache_id, cache_latency in endpoint["caches"].items():
-                saved = datacenter_latency - cache_latency
-                if saved > 0:
-                    initial_benefit[cache_id, video_id] += saved * count
-
-        heap = []
-        for (cache_id, video_id), benefit in initial_benefit.items():
-            size = video_sizes[video_id]
-            if size <= 0 or size > capacity or benefit <= 0:
+    def marginal_benefit(cache_id, video_id):
+        if video_id in cache_videos[cache_id]:
+            return 0
+        size = video_sizes[video_id]
+        if size > remaining[cache_id]:
+            return 0
+        total = 0
+        for endpoint_id, count in video_reqs.get(video_id, ()):
+            latency = endpoints[endpoint_id]["caches"].get(cache_id)
+            if latency is None:
                 continue
-            heap.append((-benefit / size, cache_id, video_id, benefit))
-        heapq.heapify(heap)
+            best = current_best[video_id, endpoint_id]
+            if latency < best:
+                total += (best - latency) * count
+        return total
 
-        if verbose:
-            print(f"  greedy: {len(heap):,} candidats", file=sys.stderr, flush=True)
+    placements = 0
+    while heap:
+        _neg_density, cache_id, video_id, old_benefit = heapq.heappop(heap)
 
-        def marginal_benefit(cache_id, video_id):
-            if video_id in cache_videos[cache_id]:
-                return 0
-            size = video_sizes[video_id]
-            if size > remaining[cache_id]:
-                return 0
-            total = 0
-            for endpoint_id, count in video_reqs.get(video_id, ()):
-                latency = endpoints[endpoint_id]["caches"].get(cache_id)
-                if latency is None:
-                    continue
-                best = current_best[video_id, endpoint_id]
-                if latency < best:
-                    total += (best - latency) * count
-            return total
+        if video_id in cache_videos[cache_id]:
+            continue
 
-        placements = 0
-        while heap:
-            _neg_density, cache_id, video_id, old_benefit = heapq.heappop(heap)
+        size = video_sizes[video_id]
+        if size > remaining[cache_id]:
+            continue
 
-            if video_id in cache_videos[cache_id]:
+        benefit = marginal_benefit(cache_id, video_id)
+        if benefit <= 0:
+            continue
+
+        if benefit != old_benefit:
+            if size <= 0:
                 continue
-
-            size = video_sizes[video_id]
-            if size > remaining[cache_id]:
-                continue
-
-            benefit = marginal_benefit(cache_id, video_id)
-            if benefit <= 0:
-                continue
-
-            if benefit != old_benefit:
-                if size <= 0:
-                    continue
-                heapq.heappush(
-                    heap,
-                    (-benefit / size, cache_id, video_id, benefit),
-                )
-                continue
-
-            place(cache_id, video_id)
-            placements += 1
-
-        if verbose:
-            print(f"  greedy: {placements} placements", file=sys.stderr, flush=True)
-
-    rounds = 6 if small_instance else 2
-
-    for round_id in range(rounds):
-        changed = False
-        cache_order = sorted(range(C), key=lambda cid: -demand[cid])
-
-        for cache_id in cache_order:
-            old_videos = set(cache_videos[cache_id])
-            if not old_videos and not cache_endpoints[cache_id]:
-                continue
-
-            cache_videos[cache_id] = set()
-            remaining[cache_id] = capacity
-            for video_id in old_videos:
-                recompute_best_for_video(video_id)
-
-            items = cache_items(cache_id)
-            new_videos = set(_knapsack_select(items, capacity))
-
-            if new_videos != old_videos:
-                changed = True
-
-            cache_videos[cache_id] = new_videos
-            remaining[cache_id] = capacity - sum(
-                video_sizes[video_id] for video_id in new_videos
+            heapq.heappush(
+                heap,
+                (-benefit / size, cache_id, video_id, benefit),
             )
-            for video_id in old_videos | new_videos:
-                recompute_best_for_video(video_id)
+            continue
 
-        if verbose:
-            print(f"  reopt round {round_id + 1}: changed={changed}", file=sys.stderr, flush=True)
+        place(cache_id, video_id)
+        placements += 1
 
-        if not changed:
-            break
-
-    if small_instance:
-        cache_to_videos = [set() for _ in range(C)]
-        for video_id, endpoint_id in counts:
-            for cache_id in endpoints[endpoint_id]["caches"]:
-                cache_to_videos[cache_id].add(video_id)
-
-        _hill_climb_small(
-            C,
-            capacity,
-            video_sizes,
-            endpoints,
-            requests,
-            cache_videos,
-            remaining,
-            cache_to_videos,
-            recompute_best_for_video,
-            verbose,
-        )
+    if verbose:
+        print(f"  greedy: {placements} placements", file=sys.stderr, flush=True)
 
     return cache_videos
-
-
-def _solution_score(endpoints, requests, cache_videos):
-    total_saved = 0
-    total_requests = 0
-
-    for video_id, endpoint_id, count in requests:
-        endpoint = endpoints[endpoint_id]
-        best = endpoint["datacenter_latency"]
-        for cache_id, latency in endpoint["caches"].items():
-            if video_id in cache_videos[cache_id] and latency < best:
-                best = latency
-        total_saved += (endpoint["datacenter_latency"] - best) * count
-        total_requests += count
-
-    if total_requests == 0:
-        return 0
-    return (total_saved * 1000) // total_requests
-
-
-def _hill_climb_small(
-    C,
-    capacity,
-    video_sizes,
-    endpoints,
-    requests,
-    cache_videos,
-    remaining,
-    cache_to_videos,
-    recompute_best_for_video,
-    verbose,
-):
-    """Add / replace videos while the official score increases."""
-    best_score = _solution_score(endpoints, requests, cache_videos)
-    if verbose:
-        print(f"  hill-climb start: {best_score:,}".replace(",", " "), file=sys.stderr)
-
-    improved = True
-    passes = 0
-    while improved and passes < 20:
-        improved = False
-        passes += 1
-
-        for cache_id in range(C):
-            candidates = cache_to_videos[cache_id]
-            current = list(cache_videos[cache_id])
-
-            for video_id in candidates:
-                if video_id in cache_videos[cache_id]:
-                    continue
-                size = video_sizes[video_id]
-                if size <= remaining[cache_id]:
-                    cache_videos[cache_id].add(video_id)
-                    remaining[cache_id] -= size
-                    score = _solution_score(endpoints, requests, cache_videos)
-                    if score > best_score:
-                        best_score = score
-                        improved = True
-                        recompute_best_for_video(video_id)
-                    else:
-                        cache_videos[cache_id].remove(video_id)
-                        remaining[cache_id] += size
-                    continue
-
-                for old_video in current:
-                    old_size = video_sizes[old_video]
-                    if remaining[cache_id] + old_size < size:
-                        continue
-                    if old_video not in cache_videos[cache_id]:
-                        continue
-
-                    cache_videos[cache_id].remove(old_video)
-                    cache_videos[cache_id].add(video_id)
-                    remaining[cache_id] += old_size - size
-                    score = _solution_score(endpoints, requests, cache_videos)
-                    if score > best_score:
-                        best_score = score
-                        improved = True
-                        recompute_best_for_video(old_video)
-                        recompute_best_for_video(video_id)
-                        current = list(cache_videos[cache_id])
-                        break
-
-                    cache_videos[cache_id].remove(video_id)
-                    cache_videos[cache_id].add(old_video)
-                    remaining[cache_id] -= old_size - size
-
-        for src in range(C):
-            for video_id in list(cache_videos[src]):
-                size = video_sizes[video_id]
-                for dst in range(C):
-                    if dst == src or video_id in cache_videos[dst]:
-                        continue
-                    if size > remaining[dst]:
-                        continue
-                    cache_videos[src].remove(video_id)
-                    cache_videos[dst].add(video_id)
-                    remaining[src] += size
-                    remaining[dst] -= size
-                    score = _solution_score(endpoints, requests, cache_videos)
-                    if score > best_score:
-                        best_score = score
-                        improved = True
-                        recompute_best_for_video(video_id)
-                        break
-                    cache_videos[dst].remove(video_id)
-                    cache_videos[src].add(video_id)
-                    remaining[dst] += size
-                    remaining[src] -= size
-                else:
-                    continue
-                break
-
-    if verbose:
-        print(f"  hill-climb end:   {best_score:,}".replace(",", " "), file=sys.stderr)
 
 
 def write_output(dest, cache_videos):
