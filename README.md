@@ -7,7 +7,6 @@ Solveur de placement de vidéos en cache (qualification Hash Code 2017).
 - `main.py` — solveur (greedy à gain marginal, knapsack, fast-fill)
 - `score.py` — score officiel
 - `generate_instances.py` — 8 instances de test
-- `compte_rendu.pdf` — rapport : fonctionnement de l’algo et instances générées
 - `me_at_the_zoo.in` — petite instance officielle
 - `generated/*.in` — instances synthétiques (graine `20260913`)
 
