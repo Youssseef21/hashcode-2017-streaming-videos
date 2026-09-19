@@ -1,10 +1,9 @@
-# Hash Code 2017 — Streaming Videos
-
+# Hash Code 2017
 Solveur de placement de vidéos en cache (qualification Hash Code 2017).
 
 ## Fichiers
 
-- `main.py` — solveur (greedy à gain marginal, knapsack, fast-fill)
+- `main.py` — solveur (greedy à gain marginal, fast-fill)
 - `score.py` — score officiel
 - `generate_instances.py` — 8 instances de test
 - `me_at_the_zoo.in` — petite instance officielle
