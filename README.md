@@ -1,29 +1,52 @@
-# Hash Code 2017
-Solveur de placement de vidéos en cache (qualification Hash Code 2017).
+# Hash Code 2017 — Streaming Videos
+
+Solveur du problème **Streaming Videos** de la Google Hash Code 2017, avec génération d'instances synthétiques pour tester l'algorithme sur différents scénarios.
 
 ## Fichiers
 
-- `main.py` — solveur (greedy à gain marginal, fast-fill)
-- `score.py` — score officiel
-- `generate_instances.py` — 8 instances de test:
-tiny_sanity → petit cas pour vérifier le fonctionnement et calculer le score à la main.
-no_cache → aucun cache connecté → vérifier que le score est bien 0.
-isolated_caches → chaque endpoint voit un seul cache → tester un cas simple et indépendant.
-trending_mini → tous les caches sont accessibles + vidéos avec popularité différente → tester les vidéos populaires.
-small_mixed → connexions et latences variées → tester un cas mixte plus réaliste.
-skewed_popular → quelques vidéos sont extrêmement demandées → tester si l'algorithme gère bien une forte popularité.
-medium → instance plus grande → tester l'algorithme sur une taille moyenne.
-large_fastfill → très grande instance → tester la performance et la branche _solve_large.
-- `me_at_the_zoo.in` — petite instance officielle
-- `generated/*.in` — instances synthétiques (graine `20260913`)
+* `main.py` — solveur principal basé sur une stratégie **greedy à gain marginal**, avec une stratégie **fast-fill** pour les grandes instances.
+* `score.py` — calcul du score selon les règles officielles de Hash Code 2017.
+* `generate_instances.py` — générateur de **8 instances synthétiques**, chacune ciblant un scénario de test différent :
+
+  * `tiny_sanity` — petite instance permettant de vérifier facilement le fonctionnement et le score à la main.
+  * `no_cache` — aucun cache connecté, le score attendu est donc `0`.
+  * `isolated_caches` — chaque endpoint est connecté à un seul cache, pour tester un cas simple et indépendant.
+  * `trending_mini` — tous les caches sont accessibles, avec des vidéos de popularités différentes.
+  * `small_mixed` — connexions, latences et requêtes variées pour simuler un cas plus réaliste.
+  * `skewed_popular` — quelques vidéos sont fortement demandées afin de tester la gestion des vidéos populaires.
+  * `medium` — instance de taille moyenne pour tester le comportement du solveur à plus grande échelle.
+  * `large_fastfill` — grande instance conçue pour tester les performances et déclencher la stratégie `_solve_large`.
+* `me_at_the_zoo.in` — petite instance officielle de qualification.
+* `generated/*.in` — instances synthétiques générées avec une seed fixe (`20260913`).
 
 ## Utilisation
 
+### Résoudre une instance
+
 ```bash
 python main.py me_at_the_zoo.in me_at_the_zoo.out
+```
+
+### Calculer le score
+
+```bash
 python score.py me_at_the_zoo.in me_at_the_zoo.out
+```
+
+### Résoudre toutes les instances
+
+```bash
 python main.py --all
+```
+
+### Générer et tester les instances synthétiques
+
+```bash
 python generate_instances.py --run
 ```
 
-Sans argument, `main.py` lit stdin et écrit la solution sur stdout (mode juge).
+### Mode juge
+
+Sans arguments, `main.py` lit l'entrée depuis `stdin` et écrit la solution sur `stdout`.
+
+
