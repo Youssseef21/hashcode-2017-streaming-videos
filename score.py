@@ -1,147 +1,200 @@
 import sys
 
-
-def read_input(filename):
-    with open(filename, "r", encoding="utf-8") as file:
-        V, E, R, C, X = map(int, file.readline().split())
-        video_sizes = list(map(int, file.readline().split()))
-
-        endpoints = []
-
-        for _ in range(E):
-            datacenter_latency, number_of_caches = map(
-                int, file.readline().split()
-            )
-
-            connected_caches = {}
-
-            for _ in range(number_of_caches):
-                cache_id, cache_latency = map(
-                    int, file.readline().split()
-                )
-                connected_caches[cache_id] = cache_latency
-
-            endpoints.append({
-                "datacenter_latency": datacenter_latency,
-                "caches": connected_caches
-            })
-
-        requests = []
-
-        for _ in range(R):
-            video_id, endpoint_id, request_count = map(
-                int, file.readline().split()
-            )
-            requests.append((video_id, endpoint_id, request_count))
-
-    return C, X, video_sizes, endpoints, requests
+NB_CACHES = 1000
 
 
-def read_output(filename, cache_count, capacity, video_sizes):
-    caches = [set() for _ in range(cache_count)]
-
-    with open(filename, "r", encoding="utf-8") as file:
-        first_line = file.readline().strip()
-
-        if not first_line:
-            raise ValueError("Le fichier de sortie est vide.")
-
-        number_of_cache_lines = int(first_line)
-
-        for _ in range(number_of_cache_lines):
-            values = list(map(int, file.readline().split()))
-
-            if not values:
-                raise ValueError("Une ligne de cache est vide.")
-
-            cache_id = values[0]
-            videos = values[1:]
-
-            if not 0 <= cache_id < cache_count:
-                raise ValueError(f"Cache invalide : {cache_id}")
-
-            if caches[cache_id]:
-                raise ValueError(
-                    f"Le cache {cache_id} est décrit plusieurs fois."
-                )
-
-            if len(videos) != len(set(videos)):
-                raise ValueError(
-                    f"Une vidéo est répétée dans le cache {cache_id}."
-                )
-
-            for video_id in videos:
-                if not 0 <= video_id < len(video_sizes):
-                    raise ValueError(
-                        f"Vidéo invalide : {video_id}"
-                    )
-
-            used_capacity = sum(video_sizes[v] for v in videos)
-
-            if used_capacity > capacity:
-                raise ValueError(
-                    f"Cache {cache_id} dépasse sa capacité : "
-                    f"{used_capacity}/{capacity} Mo"
-                )
-
-            caches[cache_id] = set(videos)
-
-    return caches
-
-
-def calculate_score(endpoints, requests, caches):
-    total_saved_time = 0
-    total_requests = 0
-
-    for video_id, endpoint_id, request_count in requests:
-        endpoint = endpoints[endpoint_id]
-        datacenter_latency = endpoint["datacenter_latency"]
-
-        best_latency = datacenter_latency
-
-        for cache_id, cache_latency in endpoint["caches"].items():
-            if video_id in caches[cache_id]:
-                best_latency = min(best_latency, cache_latency)
-
-        saved_time = datacenter_latency - best_latency
-
-        total_saved_time += saved_time * request_count
-        total_requests += request_count
-
-    if total_requests == 0:
-        return 0
-
-    return (total_saved_time * 1000) // total_requests
+def mauvaise_entree():
+    print("Score = 0")
+    return 0
 
 
 def main():
-    if len(sys.argv) != 3:
-        print("Utilisation : python score.py entree.in sortie.out")
-        sys.exit(1)
+    if len(sys.argv) < 3:
+        print("USAGE: python judge.py input output")
+        print("With:")
+        print("  - input: the filename in which there is the instance,")
+        print("  - output: the filename in which there is the solution.")
+        print("example: python judge.py testcases/a_example.txt testcases/a_example.out")
+        return
 
     input_file = sys.argv[1]
     output_file = sys.argv[2]
 
+    # =========================
+    # Parse data file
+    # =========================
+
     try:
-        C, capacity, video_sizes, endpoints, requests = read_input(
-            input_file
-        )
+        with open(input_file, "r") as f:
+            data = list(map(int, f.read().split()))
+    except FileNotFoundError:
+        print(f"Cannot open file {input_file}")
+        return
 
-        caches = read_output(
-            output_file,
-            C,
-            capacity,
-            video_sizes
-        )
+    pos = 0
 
-        score = calculate_score(endpoints, requests, caches)
+    # Première ligne :
+    # nbVideos nbEndpoints nbRequest nbCaches capacity
+    nb_videos = data[pos]
+    nb_endpoints = data[pos + 1]
+    nb_requests = data[pos + 2]
+    nb_caches = data[pos + 3]
+    capacity = data[pos + 4]
+    pos += 5
 
-        print(f"Score : {score:,}".replace(",", " "))
-        print("Le score représente les microsecondes économisées par requête.")
+    # Tailles des vidéos
+    sizes = data[pos:pos + nb_videos]
+    pos += nb_videos
 
-    except (OSError, ValueError) as error:
-        print(f"Erreur : {error}")
-        sys.exit(1)
+    # Endpoints
+    endpoints = []
+
+    for _ in range(nb_endpoints):
+        datacenter_latency = data[pos]
+        nb_caches_endpoint = data[pos + 1]
+        pos += 2
+
+        caches_latency = [0] * NB_CACHES
+
+        for _ in range(nb_caches_endpoint):
+            cache = data[pos]
+            latency = data[pos + 1]
+            pos += 2
+
+            caches_latency[cache] = latency
+
+        endpoints.append({
+            "datacenter": datacenter_latency,
+            "nb_caches": nb_caches_endpoint,
+            "caches_latency": caches_latency
+        })
+
+    # Requêtes
+    requests = []
+
+    for _ in range(nb_requests):
+        video = data[pos]
+        endpoint = data[pos + 1]
+        nb = data[pos + 2]
+        pos += 3
+
+        requests.append({
+            "video": video,
+            "endpoint": endpoint,
+            "nb": nb
+        })
+
+    # =========================
+    # Parse and check solution
+    # =========================
+
+    try:
+        with open(output_file, "r") as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        print(f"Cannot open file {output_file}")
+        return
+
+    if not lines:
+        return mauvaise_entree()
+
+    # Nombre de caches utilisés
+    try:
+        nb_used_cache = int(lines[0].strip())
+    except ValueError:
+        return mauvaise_entree()
+
+    if nb_used_cache > nb_caches:
+        return mauvaise_entree()
+
+    # solution[v] = liste des caches contenant la vidéo v
+    solution = [[] for _ in range(nb_videos)]
+
+    used_cache = [False] * nb_caches
+
+    # Chaque ligne :
+    # cache_id video1 video2 video3 ...
+    for i in range(1, nb_used_cache + 1):
+
+        if i >= len(lines):
+            return mauvaise_entree()
+
+        parts = lines[i].split()
+
+        if not parts:
+            return mauvaise_entree()
+
+        try:
+            cache = int(parts[0])
+        except ValueError:
+            return mauvaise_entree()
+
+        # Vérification du cache
+        if cache >= nb_caches or cache < 0:
+            return mauvaise_entree()
+
+        if used_cache[cache]:
+            return mauvaise_entree()
+
+        used_cache[cache] = True
+
+        total_size = 0
+
+        # Vidéos placées dans ce cache
+        for value in parts[1:]:
+
+            try:
+                video = int(value)
+            except ValueError:
+                return mauvaise_entree()
+
+            if video >= nb_videos or video < 0:
+                return mauvaise_entree()
+
+            solution[video].append(cache)
+            total_size += sizes[video]
+
+        # Vérification de la capacité
+        if total_size > capacity:
+            return mauvaise_entree()
+
+    # =========================
+    # Compute score
+    # =========================
+
+    score = 0
+    total_request = 0
+
+    for request in requests:
+
+        endpoint_id = request["endpoint"]
+        video = request["video"]
+        nb = request["nb"]
+
+        endpoint = endpoints[endpoint_id]
+
+        data_latency = endpoint["datacenter"]
+        min_latency = data_latency
+
+        total_request += nb
+
+        # Parcourt les caches contenant cette vidéo
+        for cache in solution[video]:
+
+            latency = endpoint["caches_latency"][cache]
+
+            # Dans le code C++, une latence de 0 signifie
+            # que le cache n'est pas connecté à cet endpoint.
+            if latency > 0:
+                min_latency = min(min_latency, latency)
+
+        score += nb * (data_latency - min_latency)
+
+    # Même calcul que :
+    # score*1000/totalRequest
+    final_score = score * 1000 // total_request
+
+    print(f"Score = {final_score}")
 
 
 if __name__ == "__main__":
