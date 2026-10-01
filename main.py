@@ -132,7 +132,7 @@ def _aggregate_requests(requests):
 #   Apres chaque placement, on re-verifie les candidats (on ne reconstruit pas le tas).
 # =============================================================================
 
-def solve(C, capacity, video_sizes, endpoints, requests, verbose=False):
+def solve(C, capacity, video_sizes, endpoints, requests, verbose=False, trace=None):
     """
     Greedy incremental a gain de latence marginal.
 
@@ -282,6 +282,16 @@ def solve(C, capacity, video_sizes, endpoints, requests, verbose=False):
         # Benefit matches the heap key -> this is still the best move. Take it.
         place(cache_id, video_id)
         placements += 1
+        if trace is not None:
+            used_total = capacity * C - sum(remaining)
+            trace.append((
+                cache_id,
+                video_id,
+                size,
+                remaining[cache_id],
+                benefit,
+                used_total,
+            ))
         _explain(
             verbose,
             f"    OUI  #{placements}  video {video_id} dans cache {cache_id}  "

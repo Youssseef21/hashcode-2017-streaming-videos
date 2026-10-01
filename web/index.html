@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Streaming Videos — dashboard</title>
+  <link rel="stylesheet" href="/style.css?v=4" />
+</head>
+<body>
+  <header>
+    <div>
+      <p class="kicker">Hash Code 2017</p>
+      <h1>Instance, greedy, score</h1>
+    </div>
+    <p class="hint">Ce qui compte : la taille de l'instance, si le trafic est concentre, comment le reseau est relie, puis le greedy et le score.</p>
+  </header>
+
+  <main>
+    <aside>
+      <h2>Datasets</h2>
+      <div id="dataset-list" class="list"></div>
+    </aside>
+
+    <section class="panel">
+      <div id="empty" class="empty">Selectionne un dataset a gauche.</div>
+
+      <div id="work" class="hidden">
+        <div class="title-row">
+          <div>
+            <h2 id="ds-name"></h2>
+            <p id="ds-meta" class="meta"></p>
+          </div>
+          <button id="btn-solve" type="button">Lancer le greedy</button>
+        </div>
+
+        <div class="cards" id="header-cards"></div>
+        <p id="insight" class="legend"></p>
+
+        <div class="grid-2">
+          <article>
+            <h4>Qui demande quoi (Zipf)</h4>
+            <canvas id="chart-zipf" height="160"></canvas>
+            <p class="legend">A gauche : videos tres demandees. Plus la courbe chute, plus le greedy doit prioriser les hits.</p>
+          </article>
+          <article>
+            <h4>Qui voit quels caches</h4>
+            <canvas id="chart-heat" height="160"></canvas>
+            <p class="legend">Ligne = endpoint, colonne = cache. Case sombre = pas de lien. Couleur = latence (plus clair = plus loin).</p>
+          </article>
+        </div>
+
+        <h3>Remplissage</h3>
+        <p class="legend">Le greedy pose la video avec le meilleur gain / Mo. Seul le cache le plus rapide compte pour le score.</p>
+        <div class="controls">
+          <button id="btn-play" type="button" disabled>Lecture</button>
+          <button id="btn-reset" type="button" disabled>Debut</button>
+          <label>Vitesse
+            <input id="speed" type="range" min="1" max="40" value="8" />
+          </label>
+          <input id="scrub" type="range" min="0" max="0" value="0" disabled />
+          <span id="step-label">pas encore resolu</span>
+        </div>
+        <div id="caches" class="caches"></div>
+        <p id="event" class="event"></p>
+
+        <h3>Score</h3>
+        <div class="cards" id="score-cards"></div>
+        <div class="grid-2">
+          <article>
+            <h4>Score au fil des placements</h4>
+            <canvas id="chart-score" height="160"></canvas>
+            <p id="score-legend" class="legend"></p>
+          </article>
+          <article>
+            <h4>Occupation finale des caches (Mo)</h4>
+            <canvas id="chart-fillbars" height="160"></canvas>
+          </article>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="/app.js?v=4"></script>
+</body>
+</html>
