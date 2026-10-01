@@ -18,13 +18,12 @@ import numpy as np
 
 from instance_stats import analyze_instance, drop_arrays, summary_row
 from main import read_input, solve
-from score import calculate_score
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
 CACHE = ROOT / "web_cache"
 PORT = 8765
-CACHE_VERSION = 3
+CACHE_VERSION = 5
 
 _stats_mem = {}
 _solve_mem = {}
@@ -43,7 +42,7 @@ def _datasets() -> list[dict]:
     generated = ROOT / "generated"
     if generated.is_dir():
         for path in sorted(generated.glob("*.in")):
-            if path.stem == "large_fastfill":
+            if path.stem in ("large_fastfill", "kittens"):
                 continue
             rows.append(_peek(path, "generate_instances"))
     return rows
@@ -147,6 +146,115 @@ def _scatter(sizes, volume) -> list:
     return [{"v": a, "size": b, "vol": c} for a, b, c in points]
 
 
+def calculate_score(endpoints, requests, caches):
+    total_saved = 0
+    total_requests = 0
+    for video_id, endpoint_id, count in requests:
+        endpoint = endpoints[endpoint_id]
+        datacenter = endpoint["datacenter_latency"]
+        best = datacenter
+        for cache_id, latency in endpoint["caches"].items():
+            if video_id in caches[cache_id] and latency < best:
+                best = latency
+        total_saved += (datacenter - best) * count
+        total_requests += count
+    if total_requests == 0:
+        return 0
+    return (total_saved * 1000) // total_requests
+
+
+def _solution_details(C, X, V, E, sizes, endpoints, requests, caches):
+    fill = [sum(sizes[v] for v in videos) for videos in caches]
+    occupation = [round(100.0 * f / X, 1) if X else 0.0 for f in fill]
+    n_videos = [len(videos) for videos in caches]
+    presence = [0] * V
+    for videos in caches:
+        for v in videos:
+            presence[v] += 1
+    copies = sum(presence)
+    unique = sum(1 for n in presence if n > 0)
+    extra = copies - unique
+    duplicated_videos = sum(1 for n in presence if n >= 2)
+    max_copies = max(presence) if presence else 0
+    hist = [0] * (max_copies + 1)
+    for n in presence:
+        if n:
+            hist[n] += 1
+    mo_stored = sum(fill)
+    mo_unique = sum(sizes[v] for v, n in enumerate(presence) if n > 0)
+    mo_extra = mo_stored - mo_unique
+
+    time_saved = [0] * C
+    data_dc = [0] * E
+    data_from_cache = [0] * C
+    stack_ok = E * (C + 1) <= 4000
+    data_cache_ep = [[0] * E for _ in range(C)] if stack_ok else None
+    useful = set()
+    for video_id, endpoint_id, count in requests:
+        ep = endpoints[endpoint_id]
+        dc = ep["datacenter_latency"]
+        best = dc
+        best_c = -1
+        for cache_id, lat in ep["caches"].items():
+            if video_id in caches[cache_id] and lat < best:
+                best = lat
+                best_c = cache_id
+        vol = sizes[video_id] * count
+        if best_c != -1:
+            time_saved[best_c] += count * (dc - best)
+            data_from_cache[best_c] += vol
+            useful.add((best_c, video_id))
+            if data_cache_ep is not None:
+                data_cache_ep[best_c][endpoint_id] += vol
+        else:
+            data_dc[endpoint_id] += vol
+
+    wasted = 0
+    for cache_id, videos in enumerate(caches):
+        for video_id in videos:
+            if (cache_id, video_id) not in useful:
+                wasted += 1
+
+    matrix = None
+    if V * C <= 2500:
+        matrix = [[1 if v in caches[c] else 0 for v in range(V)] for c in range(C)]
+
+    dup_videos = [
+        {"v": i, "copies": n, "taille": int(sizes[i])}
+        for i, n in enumerate(presence)
+        if n >= 2
+    ]
+    dup_videos.sort(key=lambda row: (-row["copies"], -row["taille"]))
+
+    return {
+        "remplissage_Mo": fill,
+        "occupation_pct": occupation,
+        "videos_par_cache": n_videos,
+        "moyenne_occupation_pct": round(sum(occupation) / C, 2) if C else 0,
+        "copies": copies,
+        "videos_uniques_en_cache": unique,
+        "copies_en_trop": extra,
+        "taux_duplication": round(extra / copies, 4) if copies else 0,
+        "taux_videos_dupliquees": round(duplicated_videos / unique, 4) if unique else 0,
+        "copies_moyennes": round(copies / unique, 3) if unique else 0,
+        "videos_dupliquees": duplicated_videos,
+        "histogramme_copies": hist,
+        "mo_stockes": mo_stored,
+        "mo_uniques": mo_unique,
+        "mo_dupliques": mo_extra,
+        "taux_mo_dupliques": round(mo_extra / mo_stored, 4) if mo_stored else 0,
+        "copies_inutiles": wasted,
+        "taux_copies_inutiles": round(wasted / copies, 4) if copies else 0,
+        "gain_par_cache": time_saved,
+        "volume_dc": data_dc if E <= 400 else [],
+        "volume_par_cache": data_from_cache,
+        "volume_cache_ep": data_cache_ep,
+        "presence": presence if V <= 400 else [],
+        "dupliquees": dup_videos[:40],
+        "matrice": matrix,
+    }
+
+
 def _zipf(volume) -> list:
     if volume is None or volume.size == 0:
         return []
@@ -213,9 +321,8 @@ def get_solve(path: Path) -> dict:
                 hit_volume += count
                 break
 
-    fill = [sum(sizes[v] for v in videos) for videos in caches]
     n_videos = [len(videos) for videos in caches]
-    benefit_by_cache = [0] * C
+    details = _solution_details(C, X, V, E, sizes, endpoints, requests, caches)
 
     steps = []
     saved = 0
@@ -226,7 +333,6 @@ def get_solve(path: Path) -> dict:
     for i, (cache_id, video_id, size, left, benefit, _used_total) in enumerate(trace, start=1):
         used[cache_id] += size
         saved += benefit
-        benefit_by_cache[cache_id] += benefit
         dens = benefit / size if size else 0
         live_score = (saved * 1000) // total_plays if total_plays else 0
         if i == 1 or i == len(trace) or i % keep_every == 0:
@@ -268,15 +374,11 @@ def get_solve(path: Path) -> dict:
         "temps_s": round(elapsed, 3),
         "placements": len(trace),
         "caches_utilises": sum(1 for n in n_videos if n),
-        "remplissage_Mo": fill,
-        "videos_par_cache": n_videos,
-        "gain_par_cache": benefit_by_cache,
-        "occupation_pct": [round(100.0 * f / X, 1) if X else 0 for f in fill],
         "steps": steps,
         "courbe": curve,
         "densites": densities[:500],
-        "moyenne_occupation_pct": round(100.0 * sum(fill) / (X * C), 2) if X * C else 0,
     }
+    data.update(details)
     CACHE.mkdir(exist_ok=True)
     cache_file.write_text(json.dumps(data), encoding="utf-8")
     with _lock:
@@ -319,7 +421,10 @@ class Handler(SimpleHTTPRequestHandler):
             if target is None:
                 self._send_json({"erreur": "dataset inconnu"}, 404)
                 return
-            self._send_json(get_solve(target))
+            try:
+                self._send_json(get_solve(target))
+            except Exception as exc:
+                self._send_json({"erreur": str(exc)}, 500)
             return
         if path in ("/", ""):
             self.path = "/index.html"

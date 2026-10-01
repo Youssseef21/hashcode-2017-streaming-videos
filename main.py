@@ -132,7 +132,7 @@ def _aggregate_requests(requests):
 #   Apres chaque placement, on re-verifie les candidats (on ne reconstruit pas le tas).
 # =============================================================================
 
-def solve(C, capacity, video_sizes, endpoints, requests, verbose=False):
+def solve(C, capacity, video_sizes, endpoints, requests, verbose=False, trace=None):
     """
     Greedy incremental a gain de latence marginal.
 
@@ -282,6 +282,15 @@ def solve(C, capacity, video_sizes, endpoints, requests, verbose=False):
         # Benefit matches the heap key -> this is still the best move. Take it.
         place(cache_id, video_id)
         placements += 1
+        if trace is not None:
+            trace.append((
+                cache_id,
+                video_id,
+                size,
+                remaining[cache_id],
+                benefit,
+                capacity * C - sum(remaining),
+            ))
         _explain(
             verbose,
             f"    OUI  #{placements}  video {video_id} dans cache {cache_id}  "
@@ -334,8 +343,24 @@ def write_output(dest, cache_videos, verbose=False):
             file.close()
 
 
+def calculate_score(endpoints, requests, caches):
+    total_saved = 0
+    total_requests = 0
+    for video_id, endpoint_id, count in requests:
+        endpoint = endpoints[endpoint_id]
+        datacenter = endpoint["datacenter_latency"]
+        best = datacenter
+        for cache_id, latency in endpoint["caches"].items():
+            if video_id in caches[cache_id] and latency < best:
+                best = latency
+        total_saved += (datacenter - best) * count
+        total_requests += count
+    if total_requests == 0:
+        return 0
+    return (total_saved * 1000) // total_requests
+
+
 def run_all():
-    from score import calculate_score
 
     instances = [
         "me_at_the_zoo",
