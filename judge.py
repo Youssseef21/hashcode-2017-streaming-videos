@@ -197,23 +197,5 @@ def main():
     print(f"Score = {final_score}")
 
 
-def calculate_score(endpoints, requests, caches):
-    """Score officiel Hash Code : microsecondes gagnees par requete (division entiere)."""
-    total_saved = 0
-    total_requests = 0
-    for video_id, endpoint_id, count in requests:
-        endpoint = endpoints[endpoint_id]
-        datacenter = endpoint["datacenter_latency"]
-        best = datacenter
-        for cache_id, latency in endpoint["caches"].items():
-            if video_id in caches[cache_id] and latency < best:
-                best = latency
-        total_saved += (datacenter - best) * count
-        total_requests += count
-    if total_requests == 0:
-        return 0
-    return (total_saved * 1000) // total_requests
-
-
 if __name__ == "__main__":
     main()
