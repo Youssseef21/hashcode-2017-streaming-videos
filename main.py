@@ -132,7 +132,7 @@ def _aggregate_requests(requests):
 #   Apres chaque placement, on re-verifie les candidats (on ne reconstruit pas le tas).
 # =============================================================================
 
-def solve(C, capacity, video_sizes, endpoints, requests, verbose=False, trace=None):
+def solve(C, capacity, video_sizes, endpoints, requests, verbose=False):
     """
     Greedy incremental a gain de latence marginal.
 
@@ -282,16 +282,6 @@ def solve(C, capacity, video_sizes, endpoints, requests, verbose=False, trace=No
         # Benefit matches the heap key -> this is still the best move. Take it.
         place(cache_id, video_id)
         placements += 1
-        if trace is not None:
-            used_total = capacity * C - sum(remaining)
-            trace.append((
-                cache_id,
-                video_id,
-                size,
-                remaining[cache_id],
-                benefit,
-                used_total,
-            ))
         _explain(
             verbose,
             f"    OUI  #{placements}  video {video_id} dans cache {cache_id}  "
@@ -388,6 +378,7 @@ def main():
     if len(sys.argv) == 2 and sys.argv[1] == "--all":
         run_all()
         return
+    started = time.time()  # <-- AJOUT
 
     # Sphere Engine: no arguments, input on stdin, solution on stdout only.
     judge_mode = len(sys.argv) == 1
@@ -436,6 +427,7 @@ def main():
 
     if verbose:
         print(f"Solution créée : {dest}", file=sys.stderr)
+        print(f"Temps d'exécution : {time.time() - started:.2f}s", file=sys.stderr)  
 
 
 if __name__ == "__main__":
