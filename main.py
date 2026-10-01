@@ -5,7 +5,9 @@ Deroulement (a montrer en presentation) :
 
   1. Lire l'instance            ->  read_input
   2. Fusionner les requetes     ->  _aggregate_requests
-  3. Choisir les placements     ->  solve (greedy paresseux par densite, tas)
+  3. Choisir le chemin          ->  solve
+       petit / moyen            ->  greedy paresseux par densite (tas)
+       enorme (kittens)         ->  fast-fill (_solve_large)
   4. Ecrire les caches          ->  write_output
 
 Idee centrale : seul le cache LE PLUS RAPIDE qui a deja la video compte.
@@ -18,11 +20,6 @@ import heapq
 import sys
 import time
 from collections import defaultdict
-
-# Garde-fou optionnel pour les tres grosses instances (kittens).
-# None = greedy pur, aucun filtre. Si memoire/temps trop eleves, essayer
-# par exemple 3_000_000 : on ne garde que les meilleures idees au depart.
-MAX_CANDIDATES = None
 
 
 def _explain(verbose, message=""):
@@ -126,7 +123,149 @@ def _aggregate_requests(requests):
 
 
 # =============================================================================
-# PHASE 3 -- GREEDY PARESSEUX PAR DENSITE
+# PHASE 3b -- FAST-FILL  (tres grandes instances seulement : kittens)
+# Toujours un greedy, mais cache par cache : pas de tas global (trop gros).
+# 70 endpoints les plus charges par cache, remplissage par densite, stop a 8,5 s.
+# =============================================================================
+
+def _solve_large(C, capacity, video_sizes, endpoints, requests, verbose=False, time_limit=8.5):
+    """
+    Remplissage rapide cache par cache pour les instances enormes (kittens).
+    Tableaux plats et budget temps pour que le juge recoive toujours une solution.
+    """
+    started = time.perf_counter()
+    V = len(video_sizes)
+    E = len(endpoints)
+    ep_cache = [endpoint["caches"] for endpoint in endpoints]
+    ep_dc = [endpoint["datacenter_latency"] for endpoint in endpoints]
+
+    # --- 3b.1 flatten requests into arrays indexed by rid ---
+    acc = defaultdict(int)
+    for video_id, endpoint_id, count in requests:
+        acc[video_id, endpoint_id] += count
+
+    nreq = len(acc)
+    req_v = [0] * nreq       # video de cette requete
+    req_e = [0] * nreq       # endpoint de cette requete
+    req_n = [0] * nreq       # nombre de fois demandee
+    req_best = [0] * nreq    # meilleure latence actuelle (depart = datacenter)
+    ep_rids = [[] for _ in range(E)]
+    video_rids = [[] for _ in range(V)]
+
+    for i, ((video_id, endpoint_id), count) in enumerate(acc.items()):
+        req_v[i] = video_id
+        req_e[i] = endpoint_id
+        req_n[i] = count
+        req_best[i] = ep_dc[endpoint_id]
+        ep_rids[endpoint_id].append(i)
+        video_rids[video_id].append(i)
+
+    # --- 3b.2 which endpoints touch each cache, and how busy the cache is ---
+    cache_endpoints = [[] for _ in range(C)]
+    demand = [0] * C
+    for endpoint_id in range(E):
+        request_sum = 0
+        rids = ep_rids[endpoint_id]
+        for rid in rids:
+            request_sum += req_n[rid]
+        for cache_id, latency in ep_cache[endpoint_id].items():
+            cache_endpoints[cache_id].append((endpoint_id, latency))
+            demand[cache_id] += request_sum
+
+    ep_volume = [0] * E
+    for endpoint_id in range(E):
+        total = 0
+        for rid in ep_rids[endpoint_id]:
+            total += req_n[rid]
+        ep_volume[endpoint_id] = total
+        ep_rids[endpoint_id] = tuple(ep_rids[endpoint_id])
+
+    # Un cache peut voir des centaines d'endpoints. Tout parcourir est trop
+    # lent pour le juge ; les endpoints les plus charges portent presque tout le score.
+    max_endpoints = 70
+    for cache_id in range(C):
+        conns = cache_endpoints[cache_id]
+        if len(conns) > max_endpoints:
+            conns.sort(key=lambda item: ep_volume[item[0]], reverse=True)
+            cache_endpoints[cache_id] = conns[:max_endpoints]
+
+    remaining = [capacity] * C
+    cache_videos = [set() for _ in range(C)]
+    benefit = [0] * V
+    # On remplit d'abord les caches les plus demandes.
+    order = sorted(range(C), key=lambda cid: demand[cid], reverse=True)
+
+    if verbose:
+        _phase(True, "3b", "GROSSES INSTANCES : on remplit cache par cache")
+        _explain(True, "  Trop grand pour la liste globale. On traite un cache a la fois.")
+        _explain(True, f"  {C} caches, stop au bout de 8,5 secondes")
+
+    # --- 3b.3 one greedy pack per cache ---
+    for i, cache_id in enumerate(order):
+        if time.perf_counter() - started > time_limit:
+            _explain(verbose, f"  Budget temps atteint au cache {i}/{C} -- les suivants restent vides.")
+            break
+
+        room = remaining[cache_id]
+        if room <= 0 or not cache_endpoints[cache_id]:
+            continue
+
+        # Score each video: extra ms saved if THIS cache holds it.
+        touched = []
+        rb = req_best
+        rv = req_v
+        rn = req_n
+        bf = benefit
+        add_touched = touched.append
+        for endpoint_id, latency in cache_endpoints[cache_id]:
+            for rid in ep_rids[endpoint_id]:
+                best = rb[rid]
+                if latency >= best:
+                    continue  # this cache is not faster than what we already have
+                video_id = rv[rid]
+                if bf[video_id] == 0:
+                    add_touched(video_id)
+                bf[video_id] += (best - latency) * rn[rid]
+
+        items = []
+        for video_id in touched:
+            value = benefit[video_id]
+            benefit[video_id] = 0
+            size = video_sizes[video_id]
+            if value > 0 and 0 < size <= room:
+                items.append((value / size, size, video_id))
+        items.sort(reverse=True)  # highest density first
+
+        # Place videos that still fit; then lower req_best for those requests.
+        placed_here = cache_videos[cache_id]
+        lat_by_ep = {endpoint_id: latency for endpoint_id, latency in cache_endpoints[cache_id]}
+        for _density, size, video_id in items:
+            if size > remaining[cache_id]:
+                continue
+            placed_here.add(video_id)
+            remaining[cache_id] -= size
+            for rid in video_rids[video_id]:
+                latency = lat_by_ep.get(req_e[rid])
+                if latency is not None and latency < req_best[rid]:
+                    req_best[rid] = latency
+
+        if verbose and (C <= 40 or (i + 1) % 10 == 0 or i < 5):
+            _explain(
+                True,
+                f"  Cache {cache_id} ({i + 1}/{C}) : {len(placed_here)} videos, "
+                f"reste {remaining[cache_id]} Mo",
+            )
+
+    if verbose:
+        placed = sum(len(videos) for videos in cache_videos)
+        elapsed = time.perf_counter() - started
+        print(f"  fast-fill: {placed} placements en {elapsed:.2f}s", file=sys.stderr, flush=True)
+
+    return cache_videos
+
+
+# =============================================================================
+# PHASE 3a -- GREEDY PARESSEUX PAR DENSITE  (algo principal)
 # Type : greedy incremental + file de priorite paresseuse (Minoux).
 #   densite = gain_marginal / taille
 #   Apres chaque placement, on re-verifie les candidats (on ne reconstruit pas le tas).
@@ -147,12 +286,23 @@ def solve(C, capacity, video_sizes, endpoints, requests, verbose=False):
         f"  {len(requests)} lignes dans le fichier -> {len(counts)} vraies demandes",
     )
 
+    # --- 3a.0 si le graphe est enorme, on bascule vers le fast-fill ---
+    expansion = 0
+    if C > 20:
+        for _video_id, endpoint_id, _count in requests:
+            expansion += len(endpoints[endpoint_id]["caches"])
+            if expansion > 8_000_000:
+                _explain(verbose, "  Instance trop grande -> on change de methode (cache par cache)")
+                return _solve_large(
+                    C, capacity, video_sizes, endpoints, requests, verbose=verbose
+                )
+
     _phase(verbose, 3, "GREEDY : on prend le meilleur coup, un par un")
     _explain(verbose, "  A chaque etape : quelle video mettre dans quel cache ?")
     _explain(verbose, "  On choisit celle qui rapporte le plus par Mo (densite).")
     _explain(verbose, "  Si une video est deja dans un cache plus rapide, recopier ne sert a rien.")
 
-    # --- 3.1 state: best latency per (video, endpoint), space left per cache ---
+    # --- 3a.1 state: best latency per (video, endpoint), space left per cache ---
     # Start from the datacenter: nothing is cached yet.
     current_best = {
         (video_id, endpoint_id): endpoints[endpoint_id]["datacenter_latency"]
@@ -184,7 +334,7 @@ def solve(C, capacity, video_sizes, endpoints, requests, verbose=False):
         remaining[cache_id] -= size
         apply_best_updates(cache_id, video_id)
 
-    # --- 3.2 seed scores vs the datacenter (first ranking only) ---
+    # --- 3a.2 seed scores vs the datacenter (first ranking only) ---
     initial_benefit = defaultdict(int)
     for (video_id, endpoint_id), count in counts.items():
         endpoint = endpoints[endpoint_id]
@@ -202,18 +352,7 @@ def solve(C, capacity, video_sizes, endpoints, requests, verbose=False):
         if size <= 0 or size > capacity or benefit <= 0:
             continue
         heap.append((-benefit / size, cache_id, video_id, benefit))
-    del initial_benefit  # libere la memoire avant la boucle principale
-
-    if MAX_CANDIDATES is not None and len(heap) > MAX_CANDIDATES:
-        _explain(
-            verbose,
-            f"  Filtre : on garde les {MAX_CANDIDATES} meilleures idees sur {len(heap)}",
-        )
-        # nsmallest sur -densite = les plus fortes densites ; la liste triee est un tas valide
-        heap = heapq.nsmallest(MAX_CANDIDATES, heap)
-    else:
-        heapq.heapify(heap)
-
+    heapq.heapify(heap)
     _explain(verbose, f"  On a {len(heap)} idees (video + cache), classees de la meilleure a la moins bonne")
     if verbose and heap:
         _top_density, top_c, top_v, top_b = heap[0]
@@ -242,7 +381,7 @@ def solve(C, capacity, video_sizes, endpoints, requests, verbose=False):
                 total += (best - latency) * count
         return total
 
-    # --- 3.3 lazy greedy loop: pop, re-check, place or re-push ---
+    # --- 3a.3 lazy greedy loop: pop, re-check, place or re-push ---
     placements = 0
     stale = 0
     _explain(verbose, "")
@@ -279,7 +418,7 @@ def solve(C, capacity, video_sizes, endpoints, requests, verbose=False):
             )
             continue
 
-        # Benefit matches the heap key -> this is still the best move. Take it.
+        # Benefit matches the heap key → this is still the best move. Take it.
         place(cache_id, video_id)
         placements += 1
         _explain(
@@ -393,7 +532,7 @@ def main():
     else:
         print("Utilisation : python main.py fichier.in fichier.out", file=sys.stderr)
         print("              python main.py --all", file=sys.stderr)
-        print("              python main.py   (stdin -> stdout)", file=sys.stderr)
+        print("              python main.py   (stdin → stdout)", file=sys.stderr)
         return
 
     (
