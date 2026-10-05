@@ -7,19 +7,51 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=8" />
+  <link rel="stylesheet" href="/style.css?v=13" />
 </head>
 <body>
   <header>
     <div>
       <p class="kicker">Hash Code 2017</p>
-      <h1>Entree, greedy, solution</h1>
+      <h1>Generer, resoudre, analyser</h1>
     </div>
-    <p class="hint">Stats de l'instance, puis remplissage, duplication des copies, et visualisation de la solution.</p>
+    <p class="hint">Pipeline : creer une instance, lancer le greedy, lire score / remplissage / duplication.</p>
   </header>
 
   <main>
     <aside>
+      <h2>Pipeline</h2>
+      <p class="legend">Generateur : <code>instanceCreator.py</code>. Puis greedy, puis metriques.</p>
+      <form id="gen-form" class="gen-form">
+        <label>Exemple
+          <select id="gen-preset">
+            <option value="petite">Petite instance</option>
+            <option value="moyenne">Instance moyenne</option>
+            <option value="perso">Instance personnalisee</option>
+          </select>
+        </label>
+        <label id="lab-gen">Generateur
+          <select id="gen-kind">
+            <option value="dejaVu">dejaVu</option>
+            <option value="universalLambda">universalLambda</option>
+          </select>
+        </label>
+        <label>Nom du fichier
+          <input id="gen-nom" type="text" value="petite" maxlength="40" />
+        </label>
+        <div class="gen-grid">
+          <label>V videos <input id="gen-V" type="number" min="2" max="10000" value="40" /></label>
+          <label>E endpoints <input id="gen-E" type="number" min="1" max="1000" value="8" /></label>
+          <label id="lab-R">R requetes <input id="gen-R" type="number" min="1" max="1000000" value="200" /></label>
+          <label>C caches <input id="gen-C" type="number" min="4" max="1000" value="4" /></label>
+          <label>X capacite <input id="gen-X" type="number" min="1" max="500000" value="80" /></label>
+          <label id="lab-vmin">Taille min <input id="gen-vmin" type="number" min="1" max="1000" value="4" /></label>
+          <label id="lab-vmax">Taille max <input id="gen-vmax" type="number" min="1" max="1000" value="40" /></label>
+        </div>
+        <p id="gen-legend" class="legend">Exemple dejaVu petit : rapide a generer et a resoudre.</p>
+        <button id="btn-pipeline" class="btn" type="submit">Generer + lancer</button>
+        <p id="pipe-status" class="legend"></p>
+      </form>
       <h2>Datasets</h2>
       <div id="dataset-list" class="list"></div>
     </aside>
@@ -133,6 +165,6 @@
     </section>
   </main>
   <div id="chart-tip" class="hidden"></div>
-  <script src="/app.js?v=8"></script>
+  <script src="/app.js?v=13"></script>
 </body>
 </html>

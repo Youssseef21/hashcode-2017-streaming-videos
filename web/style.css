@@ -75,6 +75,44 @@ aside {
 }
 
 .list { display: flex; flex-direction: column; gap: 0.45rem; margin-top: 0.8rem; }
+.gen-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin: 0.7rem 0 1.2rem;
+  padding: 0.75rem;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.gen-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+.gen-form input, .gen-form select {
+  font: inherit;
+  font-weight: 500;
+  color: var(--text);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 0.4rem 0.5rem;
+  background: #fff;
+}
+.gen-form input:disabled {
+  background: #f8fafc;
+  color: #475569;
+  cursor: default;
+}
+.gen-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.45rem;
+}
+#pipe-status { min-height: 2.4em; margin: 0; }
 
 .ds {
   text-align: left;

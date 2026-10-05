@@ -8,6 +8,7 @@ Dashboard web : datasets, remplissage greedy, analyse de score.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -16,8 +17,9 @@ from urllib.parse import unquote
 
 import numpy as np
 
+import instanceCreator as ic
 from instance_stats import analyze_instance, drop_arrays, summary_row
-from main import read_input, solve
+from main import read_input, solve, write_output
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -44,7 +46,11 @@ def _datasets() -> list[dict]:
         for path in sorted(generated.glob("*.in")):
             if path.stem in ("large_fastfill", "kittens"):
                 continue
-            rows.append(_peek(path, "generate_instances"))
+            rows.append(_peek(path, "generated"))
+    instances = ROOT / "instances"
+    if instances.is_dir():
+        for path in sorted(instances.glob("*.in")):
+            rows.append(_peek(path, "instances"))
     return rows
 
 
@@ -310,6 +316,7 @@ def get_solve(path: Path) -> dict:
 
     trace = []
     caches = solve(C, X, sizes, endpoints, requests, verbose=False, trace=trace)
+    write_output(str(path.with_suffix(".out")), caches)
     score = calculate_score(endpoints, requests, caches)
     elapsed = time.perf_counter() - started
 
@@ -386,6 +393,96 @@ def get_solve(path: Path) -> dict:
     return data
 
 
+def _safe_stem(name: str) -> str:
+    stem = Path(str(name)).stem.strip()
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_")
+    return stem or "custom"
+
+
+def generate_from_creator(raw: dict) -> Path:
+    kind = str(raw.get("generateur") or "dejaVu")
+    if kind not in ic.generator:
+        kind = "dejaVu"
+
+    def _int(key, default, lo, hi):
+        try:
+            value = int(raw.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(lo, min(hi, value))
+
+    V = _int("V", 200, 2, ic.MAX_AUTHORISED_VIDEO_NUMBER)
+    E = _int("E", 20, 1, ic.MAX_AUTHORISED_ENDPOINT_NUMBER)
+    R = _int("R", 800, 1, ic.MAX_AUTHORISED_REQUEST_NUMBER)
+    C = _int("C", 10, 1, ic.MAX_AUTHORISED_CACHE_NUMBER)
+    X = _int("X", 400, 1, ic.MAX_AUTHORISED_CACHE_CAPACITY)
+    seed = _int("seed", 42, 0, 1_000_000)
+    vmin = _int("V_min", 4, 1, ic.MAX_AUTHORISED_VIDEO_SIZE)
+    vmax = _int("V_max", 110, 1, ic.MAX_AUTHORISED_VIDEO_SIZE)
+    if vmax <= vmin:
+        vmax = min(ic.MAX_AUTHORISED_VIDEO_SIZE, vmin + 1)
+    if kind == "dejaVu":
+        C = max(C, 4)
+        R = max(R, 20 * E)
+        text = ic.generator["dejaVu"](
+            E=E, V=V, R=R, V_min_size=vmin, V_max_size=vmax, C=C, X=X, seed=seed
+        )
+    else:
+        text = ic.generator["universalLambda"](
+            E=E,
+            V=V,
+            C=C,
+            X=X,
+            seed=seed,
+            videoSizeLambda=lambda idV, rng: max(
+                1, ic.MAX_AUTHORISED_VIDEO_SIZE - idV + rng.randint(0, idV + 1)
+            ),
+            requestLambda=lambda idE, idV, rng: (
+                rng.randint(8000, 12001)
+                if (idE % 2, idV % 2) == (0, 1)
+                else rng.randint(-100, 101)
+            ),
+            dcLambda=lambda idE, rng: max(
+                2,
+                min(
+                    (idE + ic.MAX_AUTHORISED_SERVER_LATENCY) // 2 + rng.randint(-100, 100),
+                    ic.MAX_AUTHORISED_SERVER_LATENCY,
+                ),
+            ),
+            connectionLambda=lambda idE, idC, dcL, rng: rng.randint(
+                -300, min(ic.MAX_AUTHORISED_CACHE_LATENCY, max(2, dcL) - 1)
+            ),
+        )
+    if not text.endswith("\n"):
+        text += "\n"
+    folder = ROOT / "instances"
+    folder.mkdir(exist_ok=True)
+    path = folder / f"{_safe_stem(raw.get('nom') or 'custom_' + kind)}.in"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def run_pipeline(raw: dict) -> dict:
+    path = generate_from_creator(raw)
+    with _lock:
+        _stats_mem.pop(str(path), None)
+        _solve_mem.pop(str(path), None)
+    for suffix in (
+        f"{path.stem}.stats.v{CACHE_VERSION}.json",
+        f"{path.stem}.solve.v{CACHE_VERSION}.json",
+    ):
+        cache_file = CACHE / suffix
+        if cache_file.is_file():
+            cache_file.unlink()
+    stats = get_stats(path)
+    solve_data = get_solve(path)
+    return {
+        "dataset": _peek(path, "instanceCreator"),
+        "stats": stats,
+        "solve": solve_data,
+    }
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB), **kwargs)
@@ -401,6 +498,23 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
+
+    def _read_json(self) -> dict:
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length)
+        return json.loads(raw.decode("utf-8"))
+
+    def do_POST(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/api/pipeline":
+            try:
+                self._send_json(run_pipeline(self._read_json()))
+            except Exception as exc:
+                self._send_json({"erreur": str(exc)}, 400)
+            return
+        self._send_json({"erreur": "inconnu"}, 404)
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]

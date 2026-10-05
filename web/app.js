@@ -30,13 +30,24 @@ function fmt(n) {
   return Number(n).toLocaleString("fr-FR");
 }
 
+async function readJson(res) {
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw new Error(
+      "Le serveur n'a pas renvoye de JSON. Relance python dashboard.py puis Ctrl+F5."
+    );
+  }
+}
+
 function pct(x) {
   return (100 * x).toFixed(1) + " %";
 }
 
 async function loadDatasets() {
   const res = await fetch("/api/datasets");
-  const data = await res.json();
+  const data = await readJson(res);
   datasets = data.datasets;
   const box = $("dataset-list");
   box.innerHTML = "";
@@ -69,7 +80,7 @@ async function selectDataset(id) {
   const ds = datasets.find((d) => d.id === id);
   $("ds-name").textContent = ds.fichier;
   $("ds-meta").textContent = ds.chemin + " · " + ds.famille;
-  stats = await (await fetch("/api/stats/" + encodeURIComponent(id))).json();
+  stats = await readJson(await fetch("/api/stats/" + encodeURIComponent(id)));
   renderStats();
   $("btn-solve").disabled = false;
   $("btn-solve").textContent = ds.lourd ? "Lancer le greedy (peut etre long)" : "Lancer le greedy";
@@ -618,17 +629,10 @@ function renderDupTable() {
   ).join("");
 }
 
-async function runSolve() {
-  if (!currentId) return;
-  $("btn-solve").disabled = true;
-  $("btn-solve").textContent = "Calcul en cours…";
-  $("event").textContent = "Le greedy range les couples video+cache par densite, puis pose les OUI un par un.";
-  const res = await fetch("/api/solve/" + encodeURIComponent(currentId));
-  solve = await res.json();
-  if (solve.erreur) {
-    $("btn-solve").disabled = false;
-    $("btn-solve").textContent = "Lancer le greedy";
-    $("event").textContent = solve.erreur;
+function showSolve(payload) {
+  solve = payload;
+  if (!solve || solve.erreur) {
+    $("event").textContent = (solve && solve.erreur) || "Erreur";
     return;
   }
   $("btn-solve").disabled = false;
@@ -636,7 +640,7 @@ async function runSolve() {
   $("btn-play").disabled = false;
   $("btn-reset").disabled = false;
   $("scrub").disabled = false;
-  $("scrub").max = String(Math.max(0, solve.steps.length - 1));
+  $("scrub").max = String(Math.max(0, (solve.steps || []).length - 1));
   $("solution-block").classList.remove("hidden");
   $("score-cards").innerHTML = [
     card("Score", fmt(solve.score)),
@@ -665,11 +669,156 @@ async function runSolve() {
   buildCaches();
   frame = 0;
   $("scrub").value = "0";
-  applyFrame(0);
-  play();
+  if (solve.steps && solve.steps.length) {
+    applyFrame(0);
+    play();
+  }
+}
+
+async function runSolve() {
+  if (!currentId) return;
+  $("btn-solve").disabled = true;
+  $("btn-solve").textContent = "Calcul en cours…";
+  $("event").textContent = "Le greedy range les couples video+cache par densite, puis pose les OUI un par un.";
+  const res = await fetch("/api/solve/" + encodeURIComponent(currentId));
+  const payload = await readJson(res);
+  if (payload.erreur) {
+    $("btn-solve").disabled = false;
+    $("btn-solve").textContent = "Lancer le greedy";
+    $("event").textContent = payload.erreur;
+    return;
+  }
+  showSolve(payload);
+}
+
+const PRESETS = {
+  petite: {
+    generateur: "dejaVu",
+    nom: "petite",
+    V: 40,
+    E: 8,
+    R: 200,
+    C: 4,
+    X: 80,
+    vmin: 4,
+    vmax: 40,
+    legend: "Exemple petit (dejaVu) : peu de videos, calcul rapide.",
+  },
+  moyenne: {
+    generateur: "dejaVu",
+    nom: "moyenne",
+    V: 200,
+    E: 20,
+    R: 800,
+    C: 10,
+    X: 400,
+    vmin: 4,
+    vmax: 110,
+    legend: "Exemple moyen (dejaVu) : taille de demo, encore raisonnable.",
+  },
+  perso: {
+    generateur: "dejaVu",
+    nom: "perso",
+    V: 120,
+    E: 15,
+    R: 400,
+    C: 8,
+    X: 250,
+    vmin: 4,
+    vmax: 80,
+    legend: "Personnalisee : tu changes les parametres. dejaVu ou universalLambda.",
+  },
+};
+
+function setFieldsLocked(locked) {
+  ["gen-V", "gen-E", "gen-R", "gen-C", "gen-X", "gen-vmin", "gen-vmax"].forEach((id) => {
+    const el = $(id);
+    if (el) el.disabled = locked;
+  });
+  $("lab-gen").style.display = locked ? "none" : "";
+}
+
+function applyPreset(name) {
+  const p = PRESETS[name] || PRESETS.petite;
+  $("gen-kind").value = p.generateur;
+  $("gen-nom").value = p.nom;
+  $("gen-V").value = p.V;
+  $("gen-E").value = p.E;
+  $("gen-R").value = p.R;
+  $("gen-C").value = p.C;
+  $("gen-X").value = p.X;
+  $("gen-vmin").value = p.vmin;
+  $("gen-vmax").value = p.vmax;
+  $("gen-legend").textContent = p.legend;
+  setFieldsLocked(name !== "perso");
+  syncKindFields();
+}
+
+function formParams() {
+  const preset = $("gen-preset").value;
+  const generateur = preset === "perso" ? $("gen-kind").value : (PRESETS[preset] || PRESETS.petite).generateur;
+  return {
+    generateur,
+    nom: $("gen-nom").value,
+    V: $("gen-V").value,
+    E: $("gen-E").value,
+    R: $("gen-R").value,
+    C: $("gen-C").value,
+    X: $("gen-X").value,
+    V_min: $("gen-vmin").value,
+    V_max: $("gen-vmax").value,
+  };
+}
+
+async function runPipeline(ev) {
+  if (ev) ev.preventDefault();
+  const btn = $("btn-pipeline");
+  const status = $("pipe-status");
+  btn.disabled = true;
+  status.textContent = "1/3 Generation du .in…";
+  try {
+    const res = await fetch("/api/pipeline", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(formParams()),
+    });
+    const data = await readJson(res);
+    if (data.erreur) {
+      status.textContent = data.erreur;
+      btn.disabled = false;
+      return;
+    }
+    status.textContent = "2/3 Greedy termine · 3/3 Affichage des metriques";
+    await loadDatasets();
+    currentId = data.dataset.id;
+    setActive(currentId);
+    $("empty").classList.add("hidden");
+    $("work").classList.remove("hidden");
+    $("ds-name").textContent = data.dataset.fichier;
+    $("ds-meta").textContent = data.dataset.chemin + " · genere + resolu";
+    stats = data.stats;
+    renderStats();
+    $("event").textContent = "Pipeline terminee : " + data.dataset.fichier + " → " + data.dataset.fichier.replace(/\.in$/, ".out");
+    showSolve(data.solve);
+    status.textContent = "OK : " + data.dataset.fichier + " + greedy + metriques.";
+  } catch (err) {
+    status.textContent = String(err);
+  }
+  btn.disabled = false;
+}
+
+function syncKindFields() {
+  const uni = $("gen-kind").value === "universalLambda";
+  $("lab-R").style.display = uni ? "none" : "";
+  $("lab-vmin").style.display = uni ? "none" : "";
+  $("lab-vmax").style.display = uni ? "none" : "";
 }
 
 $("btn-solve").onclick = runSolve;
+$("gen-preset").onchange = () => applyPreset($("gen-preset").value);
+$("gen-kind").onchange = syncKindFields;
+$("gen-form").onsubmit = runPipeline;
+applyPreset($("gen-preset").value);
 $("btn-play").onclick = play;
 $("btn-reset").onclick = () => {
   stopPlay();
