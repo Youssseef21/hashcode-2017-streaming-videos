@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Streaming Videos — dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css?v=8" />
+</head>
+<body>
+  <header>
+    <div>
+      <p class="kicker">Hash Code 2017</p>
+      <h1>Entree, greedy, solution</h1>
+    </div>
+    <p class="hint">Stats de l'instance, puis remplissage, duplication des copies, et visualisation de la solution.</p>
+  </header>
+
+  <main>
+    <aside>
+      <h2>Datasets</h2>
+      <div id="dataset-list" class="list"></div>
+    </aside>
+
+    <section class="panel">
+      <div id="empty" class="empty">Selectionne un dataset a gauche.</div>
+
+      <div id="work" class="hidden">
+        <div class="title-row">
+          <div>
+            <h2 id="ds-name"></h2>
+            <p id="ds-meta" class="meta"></p>
+          </div>
+          <button id="btn-solve" class="btn" type="button">Lancer le greedy</button>
+        </div>
+
+        <h3>Instance (entree)</h3>
+        <div class="cards" id="header-cards"></div>
+        <p id="insight" class="legend"></p>
+
+        <div class="grid-2">
+          <article>
+            <h4>Qui demande quoi (Zipf)</h4>
+            <canvas id="chart-zipf" height="160"></canvas>
+            <p class="legend">A gauche : videos tres demandees. Plus la courbe chute, plus le greedy doit prioriser les hits.</p>
+          </article>
+          <article>
+            <h4>Qui voit quels caches</h4>
+            <canvas id="chart-heat" height="160"></canvas>
+            <p class="legend">Ligne = endpoint, colonne = cache. Case claire = pas de lien. Plus c'est fonce, plus la latence est elevee.</p>
+          </article>
+        </div>
+
+        <h3>Remplissage</h3>
+        <p class="legend">Le greedy pose la video avec le meilleur gain / Mo. Seul le cache le plus rapide compte pour le score.</p>
+        <div class="controls">
+          <button id="btn-play" class="btn btn-ghost" type="button" disabled>Lecture</button>
+          <button id="btn-reset" class="btn btn-ghost" type="button" disabled>Debut</button>
+          <label>Vitesse
+            <input id="speed" type="range" min="1" max="40" value="8" />
+          </label>
+          <input id="scrub" type="range" min="0" max="0" value="0" disabled />
+          <span id="step-label">pas encore resolu</span>
+        </div>
+        <div id="caches" class="caches"></div>
+        <p id="event" class="event"></p>
+
+        <div id="solution-block" class="hidden">
+          <h3>Solution</h3>
+          <div class="cards" id="score-cards"></div>
+          <div class="cards highlight" id="dup-cards"></div>
+          <p id="dup-legend" class="legend"></p>
+
+          <div class="grid-2">
+            <article>
+              <h4>Taux de remplissage par cache (%)</h4>
+              <canvas id="chart-fillpct" height="160"></canvas>
+              <p class="legend">Mo utilises / capacite X. Une barre a 100 % = cache plein.</p>
+            </article>
+            <article>
+              <h4>Temps gagne par cache</h4>
+              <canvas id="chart-saved" height="160"></canvas>
+              <p class="legend">Millisecondes attribuees au cache le plus rapide (comme dans dashboard.html).</p>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article>
+              <h4>Duplication : copies par video</h4>
+              <canvas id="chart-presence" height="160"></canvas>
+              <p id="presence-legend" class="legend">1 = une seule copie. 2+ = video reproduite dans plusieurs caches.</p>
+            </article>
+            <article>
+              <h4>Combien de videos ont k copies</h4>
+              <canvas id="chart-duphist" height="160"></canvas>
+              <p class="legend">Barre k=1 : videos uniques. k=2, 3… : videos dupliquees.</p>
+            </article>
+          </div>
+
+          <article class="wide">
+            <h4>Volume de donnees par endpoint (DC vs caches)</h4>
+            <canvas id="chart-volume" height="180"></canvas>
+            <p class="legend">Gris = datacenter. Couleurs = cache qui sert vraiment (copie la plus rapide).</p>
+          </article>
+
+          <article class="wide" id="matrix-wrap">
+            <h4>Presence video × cache</h4>
+            <canvas id="chart-matrix" height="180"></canvas>
+            <p class="legend">Ligne = cache, colonne = video. Case bleue = la video est dans ce cache. Plusieurs cases sur une colonne = duplication.</p>
+          </article>
+
+          <article class="wide" id="dup-table-wrap">
+            <h4>Videos dupliquees</h4>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>Video</th><th>Copies</th><th>Taille (Mo)</th></tr>
+                </thead>
+                <tbody id="dup-table"></tbody>
+              </table>
+            </div>
+          </article>
+
+          <h3>Score au fil des placements</h3>
+          <article class="wide">
+            <canvas id="chart-score" height="160"></canvas>
+            <p id="score-legend" class="legend"></p>
+          </article>
+        </div>
+      </div>
+    </section>
+  </main>
+  <div id="chart-tip" class="hidden"></div>
+  <script src="/app.js?v=8"></script>
+</body>
+</html>
