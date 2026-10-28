@@ -1,29 +1,49 @@
 """
 Hash Code 2017 -- Streaming Videos
 
-Deroulement (a montrer en presentation) :
-
-  1. Lire l'instance            ->  read_input
-  2. Fusionner les requetes     ->  _aggregate_requests
-  3. Choisir le chemin          ->  solve
-       petit / moyen            ->  greedy paresseux par densite (tas)
-       enorme (kittens)         ->  fast-fill (_solve_large)
-  4. Ecrire les caches          ->  write_output
-
-Idee centrale : seul le cache LE PLUS RAPIDE qui a deja la video compte.
-On note donc un placement par son gain MARGINAL par rapport au meilleur
-actuel, plus par rapport au datacenter une fois qu'une meilleure copie existe.
-Densite = gain_marginal / taille  (greedy style sac a dos).
+Pipeline minimal :
+    1. Lecture
+    2. Greedy densite (alpha=1)
+    3. Cache-seq (si utile) : remplir les caches un par un depuis vide
+    4. Sac a dos exact par cache (1 seed) + PGCD si tailles commensurables
+    5. Recherche locale (trous, promotion, echanges voisins)
+    6. Ecriture
 """
 
+from __future__ import annotations
+
 import heapq
+import math
+import os
+import random
 import sys
 import time
 from collections import defaultdict
+from pathlib import Path
+
+import numpy as np
+
+
+TOTAL_TIME_LIMIT = float(os.environ.get("HC_TIME", "570"))
+MAX_DP_CELLS = 80_000_000
+
+
+def choose_params(V, E, R, C, X):
+    """Petit reglage : quand activer cache-seq et quelle taille de DP."""
+    insane_x = X >= 10_000_000
+    tiny_x = X <= 200 and C >= 80
+    many_c = C >= 200 and R < 80_000
+
+    if insane_x:
+        return {"dp_max_cap": 8_000, "knapsack_max_items": 4_000, "cache_seq": True, "ls_share": 0.25}
+    if tiny_x or many_c:
+        return {"dp_max_cap": min(X, 20_000), "knapsack_max_items": 3_000, "cache_seq": True, "ls_share": 0.35}
+    if X >= 20_000:
+        return {"dp_max_cap": min(X, 40_000), "knapsack_max_items": 5_000, "cache_seq": False, "ls_share": 0.18}
+    return {"dp_max_cap": min(X, 20_000), "knapsack_max_items": 3_000, "cache_seq": False, "ls_share": 0.20}
 
 
 def _explain(verbose, message=""):
-    """Affiche une ligne de presentation dans le terminal (stderr, jamais le .out)."""
     if verbose:
         print(message, file=sys.stderr, flush=True)
 
@@ -37,31 +57,6 @@ def _phase(verbose, number, title):
     print("=" * 62, file=sys.stderr, flush=True)
 
 
-def _print_regle(verbose):
-    """Regle du greedy, affichee en premier pour l'oral."""
-    _phase(verbose, 0, "LA REGLE (comment on calcule)")
-    _explain(verbose, "  Score officiel : on economise du temps si la video est dans un cache proche.")
-    _explain(verbose, "  Seul le cache LE PLUS RAPIDE compte (pas les copies plus lentes).")
-    _explain(verbose, "")
-    _explain(verbose, "  Gain d'un couple (video, cache) :")
-    _explain(verbose, "    gain = (latence_actuelle - latence_cache) x nombre_de_requetes")
-    _explain(verbose, "    uniquement si ce cache est plus rapide que le meilleur actuel")
-    _explain(verbose, "")
-    _explain(verbose, "  Au debut, latence_actuelle = datacenter (loin).")
-    _explain(verbose, "  Apres un placement, latence_actuelle = ce cache (plus proche).")
-    _explain(verbose, "")
-    _explain(verbose, "  Densite = gain / taille_en_Mo")
-    _explain(verbose, "  On prend toujours la densite la plus grande (le plus de temps gagne par Mo).")
-    _explain(verbose, "")
-    _explain(verbose, "  OUI = le gain n'a pas change, on place.")
-    _explain(verbose, "  NON = le gain a baisse (deja une meilleure copie), on remet dans la liste.")
-
-
-# =============================================================================
-# PHASE 1 -- LECTURE DE L'INSTANCE
-# Format : V E R C X, puis tailles, puis endpoints, puis requetes.
-# =============================================================================
-
 def read_input(source):
     close = False
     if hasattr(source, "readline"):
@@ -69,253 +64,73 @@ def read_input(source):
     else:
         file = open(source, "r", encoding="utf-8")
         close = True
-
     try:
-        # V videos, E endpoints, R lignes de requetes, C caches, X = capacite (Mo)
         V, E, R, C, X = map(int, file.readline().split())
         video_sizes = list(map(int, file.readline().split()))
-
         endpoints = []
         for _ in range(E):
-            datacenter_latency, number_of_caches = map(
-                int, file.readline().split()
-            )
-            # cache_id -> latence depuis cet endpoint (uniquement les caches relies)
+            datacenter_latency, number_of_caches = map(int, file.readline().split())
             connected_caches = {}
             for _ in range(number_of_caches):
                 cache_id, cache_latency = map(int, file.readline().split())
                 connected_caches[cache_id] = cache_latency
             endpoints.append({
                 "datacenter_latency": datacenter_latency,
-                "caches": connected_caches
+                "caches": connected_caches,
             })
-
-        # Chaque requete : "l'endpoint e veut la video v, n fois"
         requests = []
         for _ in range(R):
-            video_id, endpoint_id, number_of_requests = map(
-                int, file.readline().split()
-            )
+            video_id, endpoint_id, number_of_requests = map(int, file.readline().split())
             requests.append((video_id, endpoint_id, number_of_requests))
     finally:
         if close:
             file.close()
-
     return V, E, R, C, X, video_sizes, endpoints, requests
 
 
-# =============================================================================
-# PHASE 2 -- AGREGATION DES REQUETES
-# Deux lignes (v, e, 10) et (v, e, 4) deviennent un volume de 14.
-# video_reqs[v] = liste des (endpoint, volume) qui demandent v.
-# =============================================================================
+def calculate_score(endpoints, requests, cache_videos):
+    where = defaultdict(list)
+    for cache_id, videos in enumerate(cache_videos):
+        for video_id in videos:
+            where[video_id].append(cache_id)
+    saved = total = 0
+    for video_id, endpoint_id, count in requests:
+        endpoint = endpoints[endpoint_id]
+        datacenter_latency = endpoint["datacenter_latency"]
+        best = datacenter_latency
+        for cache_id in where.get(video_id, ()):
+            latency = endpoint["caches"].get(cache_id)
+            if latency is not None and latency < best:
+                best = latency
+        saved += count * (datacenter_latency - best)
+        total += count
+    return saved * 1000 // total if total else 0
+
 
 def _aggregate_requests(requests):
     counts = defaultdict(int)
     for video_id, endpoint_id, count in requests:
         counts[video_id, endpoint_id] += count
-
     video_reqs = defaultdict(list)
     for (video_id, endpoint_id), count in counts.items():
         video_reqs[video_id].append((endpoint_id, count))
-
     return counts, video_reqs
 
 
-# =============================================================================
-# PHASE 3b -- FAST-FILL  (tres grandes instances seulement : kittens)
-# Toujours un greedy, mais cache par cache : pas de tas global (trop gros).
-# 70 endpoints les plus charges par cache, remplissage par densite, stop a 8,5 s.
-# =============================================================================
-
-def _solve_large(C, capacity, video_sizes, endpoints, requests, verbose=False, time_limit=8.5):
-    """
-    Remplissage rapide cache par cache pour les instances enormes (kittens).
-    Tableaux plats et budget temps pour que le juge recoive toujours une solution.
-    """
-    started = time.perf_counter()
-    V = len(video_sizes)
-    E = len(endpoints)
-    ep_cache = [endpoint["caches"] for endpoint in endpoints]
-    ep_dc = [endpoint["datacenter_latency"] for endpoint in endpoints]
-
-    # --- 3b.1 flatten requests into arrays indexed by rid ---
-    acc = defaultdict(int)
-    for video_id, endpoint_id, count in requests:
-        acc[video_id, endpoint_id] += count
-
-    nreq = len(acc)
-    req_v = [0] * nreq       # video de cette requete
-    req_e = [0] * nreq       # endpoint de cette requete
-    req_n = [0] * nreq       # nombre de fois demandee
-    req_best = [0] * nreq    # meilleure latence actuelle (depart = datacenter)
-    ep_rids = [[] for _ in range(E)]
-    video_rids = [[] for _ in range(V)]
-
-    for i, ((video_id, endpoint_id), count) in enumerate(acc.items()):
-        req_v[i] = video_id
-        req_e[i] = endpoint_id
-        req_n[i] = count
-        req_best[i] = ep_dc[endpoint_id]
-        ep_rids[endpoint_id].append(i)
-        video_rids[video_id].append(i)
-
-    # --- 3b.2 which endpoints touch each cache, and how busy the cache is ---
-    cache_endpoints = [[] for _ in range(C)]
-    demand = [0] * C
-    for endpoint_id in range(E):
-        request_sum = 0
-        rids = ep_rids[endpoint_id]
-        for rid in rids:
-            request_sum += req_n[rid]
-        for cache_id, latency in ep_cache[endpoint_id].items():
-            cache_endpoints[cache_id].append((endpoint_id, latency))
-            demand[cache_id] += request_sum
-
-    ep_volume = [0] * E
-    for endpoint_id in range(E):
-        total = 0
-        for rid in ep_rids[endpoint_id]:
-            total += req_n[rid]
-        ep_volume[endpoint_id] = total
-        ep_rids[endpoint_id] = tuple(ep_rids[endpoint_id])
-
-    # Un cache peut voir des centaines d'endpoints. Tout parcourir est trop
-    # lent pour le juge ; les endpoints les plus charges portent presque tout le score.
-    max_endpoints = 70
-    for cache_id in range(C):
-        conns = cache_endpoints[cache_id]
-        if len(conns) > max_endpoints:
-            conns.sort(key=lambda item: ep_volume[item[0]], reverse=True)
-            cache_endpoints[cache_id] = conns[:max_endpoints]
-
-    remaining = [capacity] * C
-    cache_videos = [set() for _ in range(C)]
-    benefit = [0] * V
-    # On remplit d'abord les caches les plus demandes.
-    order = sorted(range(C), key=lambda cid: demand[cid], reverse=True)
-
-    if verbose:
-        _phase(True, "3b", "GROSSES INSTANCES : on remplit cache par cache")
-        _explain(True, "  Trop grand pour la liste globale. On traite un cache a la fois.")
-        _explain(True, f"  {C} caches, stop au bout de 8,5 secondes")
-
-    # --- 3b.3 one greedy pack per cache ---
-    for i, cache_id in enumerate(order):
-        if time.perf_counter() - started > time_limit:
-            _explain(verbose, f"  Budget temps atteint au cache {i}/{C} -- les suivants restent vides.")
-            break
-
-        room = remaining[cache_id]
-        if room <= 0 or not cache_endpoints[cache_id]:
-            continue
-
-        # Score each video: extra ms saved if THIS cache holds it.
-        touched = []
-        rb = req_best
-        rv = req_v
-        rn = req_n
-        bf = benefit
-        add_touched = touched.append
-        for endpoint_id, latency in cache_endpoints[cache_id]:
-            for rid in ep_rids[endpoint_id]:
-                best = rb[rid]
-                if latency >= best:
-                    continue  # this cache is not faster than what we already have
-                video_id = rv[rid]
-                if bf[video_id] == 0:
-                    add_touched(video_id)
-                bf[video_id] += (best - latency) * rn[rid]
-
-        items = []
-        for video_id in touched:
-            value = benefit[video_id]
-            benefit[video_id] = 0
-            size = video_sizes[video_id]
-            if value > 0 and 0 < size <= room:
-                items.append((value / size, size, video_id))
-        items.sort(reverse=True)  # highest density first
-
-        # Place videos that still fit; then lower req_best for those requests.
-        placed_here = cache_videos[cache_id]
-        lat_by_ep = {endpoint_id: latency for endpoint_id, latency in cache_endpoints[cache_id]}
-        for _density, size, video_id in items:
-            if size > remaining[cache_id]:
-                continue
-            placed_here.add(video_id)
-            remaining[cache_id] -= size
-            for rid in video_rids[video_id]:
-                latency = lat_by_ep.get(req_e[rid])
-                if latency is not None and latency < req_best[rid]:
-                    req_best[rid] = latency
-
-        if verbose and (C <= 40 or (i + 1) % 10 == 0 or i < 5):
-            _explain(
-                True,
-                f"  Cache {cache_id} ({i + 1}/{C}) : {len(placed_here)} videos, "
-                f"reste {remaining[cache_id]} Mo",
-            )
-
-    if verbose:
-        placed = sum(len(videos) for videos in cache_videos)
-        elapsed = time.perf_counter() - started
-        print(f"  fast-fill: {placed} placements en {elapsed:.2f}s", file=sys.stderr, flush=True)
-
-    return cache_videos
-
-
-# =============================================================================
-# PHASE 3a -- GREEDY PARESSEUX PAR DENSITE  (algo principal)
-# Type : greedy incremental + file de priorite paresseuse (Minoux).
-#   densite = gain_marginal / taille
-#   Apres chaque placement, on re-verifie les candidats (on ne reconstruit pas le tas).
-# =============================================================================
-
-def solve(C, capacity, video_sizes, endpoints, requests, verbose=False):
-    """
-    Greedy incremental a gain de latence marginal.
-
-    Seul le cache le plus rapide qui contient deja la video compte.
-    Chaque placement est donc note contre la meilleure latence actuelle,
-    pas contre le datacenter.
-    """
+def solve(C, capacity, video_sizes, endpoints, requests, verbose=False, trace=None):
+    """Greedy lazy par densite (gain / taille)."""
     counts, video_reqs = _aggregate_requests(requests)
-    _phase(verbose, 2, "ON FUSIONNE LES DEMANDES IDENTIQUES")
-    _explain(
-        verbose,
-        f"  {len(requests)} lignes dans le fichier -> {len(counts)} vraies demandes",
-    )
+    _phase(verbose, 2, "GREEDY densite")
 
-    # --- 3a.0 si le graphe est enorme, on bascule vers le fast-fill ---
-    expansion = 0
-    if C > 20:
-        for _video_id, endpoint_id, _count in requests:
-            expansion += len(endpoints[endpoint_id]["caches"])
-            if expansion > 8_000_000:
-                _explain(verbose, "  Instance trop grande -> on change de methode (cache par cache)")
-                return _solve_large(
-                    C, capacity, video_sizes, endpoints, requests, verbose=verbose
-                )
-
-    _phase(verbose, 3, "GREEDY : on prend le meilleur coup, un par un")
-    _explain(verbose, "  A chaque etape : quelle video mettre dans quel cache ?")
-    _explain(verbose, "  On choisit celle qui rapporte le plus par Mo (densite).")
-    _explain(verbose, "  Si une video est deja dans un cache plus rapide, recopier ne sert a rien.")
-
-    # --- 3a.1 state: best latency per (video, endpoint), space left per cache ---
-    # Start from the datacenter: nothing is cached yet.
     current_best = {
         (video_id, endpoint_id): endpoints[endpoint_id]["datacenter_latency"]
         for video_id, endpoint_id in counts
     }
-    _explain(verbose, "  Au debut, tout le monde telecharge depuis le datacenter (loin).")
-
     remaining = [capacity] * C
     cache_videos = [set() for _ in range(C)]
 
     def apply_best_updates(cache_id, video_id):
-        """Apres placement : certains endpoints ont peut-etre une copie plus rapide."""
-        for endpoint_id, count in video_reqs.get(video_id, ()):
+        for endpoint_id, _count in video_reqs.get(video_id, ()):
             latency = endpoints[endpoint_id]["caches"].get(cache_id)
             if latency is None:
                 continue
@@ -324,7 +139,6 @@ def solve(C, capacity, video_sizes, endpoints, requests, verbose=False):
                 current_best[key] = latency
 
     def place(cache_id, video_id):
-        """Pose un couple (cache, video) s'il tient encore."""
         if video_id in cache_videos[cache_id]:
             return
         size = video_sizes[video_id]
@@ -334,18 +148,15 @@ def solve(C, capacity, video_sizes, endpoints, requests, verbose=False):
         remaining[cache_id] -= size
         apply_best_updates(cache_id, video_id)
 
-    # --- 3a.2 seed scores vs the datacenter (first ranking only) ---
     initial_benefit = defaultdict(int)
     for (video_id, endpoint_id), count in counts.items():
         endpoint = endpoints[endpoint_id]
-        datacenter_latency = endpoint["datacenter_latency"]
+        dc = endpoint["datacenter_latency"]
         for cache_id, cache_latency in endpoint["caches"].items():
-            saved = datacenter_latency - cache_latency
+            saved = dc - cache_latency
             if saved > 0:
                 initial_benefit[cache_id, video_id] += saved * count
 
-    # Max-heap of (-density, cache, video, benefit_used_to_rank)
-    # Python heapq is a min-heap, so we store negative density.
     heap = []
     for (cache_id, video_id), benefit in initial_benefit.items():
         size = video_sizes[video_id]
@@ -353,23 +164,9 @@ def solve(C, capacity, video_sizes, endpoints, requests, verbose=False):
             continue
         heap.append((-benefit / size, cache_id, video_id, benefit))
     heapq.heapify(heap)
-    _explain(verbose, f"  On a {len(heap)} idees (video + cache), classees de la meilleure a la moins bonne")
-    if verbose and heap:
-        _top_density, top_c, top_v, top_b = heap[0]
-        _explain(
-            verbose,
-            f"  Premiere idee : video {top_v} dans cache {top_c}  (meilleur rapport gain/taille)",
-        )
 
     def marginal_benefit(cache_id, video_id):
-        """
-        Millisecondes encore gagnees SI on met cette video dans CE cache.
-        Si un cache plus rapide l'a deja, le resultat est 0.
-        """
-        if video_id in cache_videos[cache_id]:
-            return 0
-        size = video_sizes[video_id]
-        if size > remaining[cache_id]:
+        if video_id in cache_videos[cache_id] or video_sizes[video_id] > remaining[cache_id]:
             return 0
         total = 0
         for endpoint_id, count in video_reqs.get(video_id, ()):
@@ -381,78 +178,444 @@ def solve(C, capacity, video_sizes, endpoints, requests, verbose=False):
                 total += (best - latency) * count
         return total
 
-    # --- 3a.3 lazy greedy loop: pop, re-check, place or re-push ---
     placements = 0
-    stale = 0
-    _explain(verbose, "")
-    _explain(verbose, "  OUI = on met la video    NON = le chiffre a change, on remet dans la liste")
-
     while heap:
-        _neg_density, cache_id, video_id, old_benefit = heapq.heappop(heap)
-
+        _neg, cache_id, video_id, old_benefit = heapq.heappop(heap)
         if video_id in cache_videos[cache_id]:
             continue
-
         size = video_sizes[video_id]
         if size > remaining[cache_id]:
             continue
-
-        # Stale entry? Another placement already stole part of this gain.
         benefit = marginal_benefit(cache_id, video_id)
         if benefit <= 0:
             continue
-
         if benefit != old_benefit:
-            # Re-insert with the fresh density; it may no longer be the best.
-            if size <= 0:
-                continue
-            heapq.heappush(
-                heap,
-                (-benefit / size, cache_id, video_id, benefit),
-            )
-            stale += 1
-            _explain(
-                verbose,
-                f"    NON  video {video_id} dans cache {cache_id} : "
-                f"deja une meilleure copie ailleurs",
-            )
+            heapq.heappush(heap, (-benefit / size, cache_id, video_id, benefit))
             continue
-
-        # Benefit matches the heap key → this is still the best move. Take it.
         place(cache_id, video_id)
         placements += 1
-        _explain(
-            verbose,
-            f"    OUI  #{placements}  video {video_id} dans cache {cache_id}  "
-            f"({size} Mo, reste {remaining[cache_id]} Mo)",
-        )
+        if trace is not None:
+            trace.append((
+                cache_id, video_id, size, remaining[cache_id],
+                benefit, capacity - remaining[cache_id],
+            ))
 
-    _explain(verbose, "")
-    _explain(verbose, f"  Bilan : {placements} videos placees, {stale} idees trop vieilles (on ne les a pas prises)")
-    used = sum(1 for videos in cache_videos if videos)
-    _explain(verbose, f"  {used} caches sur {C} sont utilises")
-
+    _explain(verbose, f"  {placements} placements")
     return cache_videos
 
 
-# =============================================================================
-# PHASE 4 -- ECRITURE DE LA SOLUTION
-# Premiere ligne : nombre de caches utilises.
-# Ensuite : cache_id  video_id video_id ...
-# =============================================================================
+def build_structures(C, endpoints, counts):
+    ep_reqs = defaultdict(list)
+    for (video_id, endpoint_id), count in counts.items():
+        ep_reqs[endpoint_id].append((video_id, count))
+
+    cache_endpoints = [[] for _ in range(C)]
+    neighbors = [set() for _ in range(C)]
+    for e, endpoint in enumerate(endpoints):
+        if e not in ep_reqs:
+            continue
+        ids = list(endpoint["caches"])
+        for c, lat in endpoint["caches"].items():
+            cache_endpoints[c].append((e, lat))
+        for a in ids:
+            neighbors[a].update(ids)
+    for c in range(C):
+        neighbors[c].discard(c)
+    return ep_reqs, cache_endpoints, neighbors
+
+
+def _recompute_best(v, e, endpoints, cache_videos):
+    endpoint = endpoints[e]
+    dc = endpoint["datacenter_latency"]
+    b1, b1c, b2 = dc, -1, dc
+    for c2, lat in endpoint["caches"].items():
+        if lat < b2 and v in cache_videos[c2]:
+            if lat < b1:
+                b2, b1, b1c = b1, lat, c2
+            else:
+                b2 = lat
+    return (b1, b1c, b2)
+
+
+def build_best_state(endpoints, counts, cache_videos):
+    return {(v, e): _recompute_best(v, e, endpoints, cache_videos) for v, e in counts}
+
+
+def update_best_state(c, changed, endpoints, cache_endpoints, counts, cache_videos, state):
+    for e, _lat in cache_endpoints[c]:
+        for v in changed:
+            if (v, e) in counts:
+                state[v, e] = _recompute_best(v, e, endpoints, cache_videos)
+
+
+def compute_gain(c, cache_endpoints, ep_reqs, state):
+    gain = defaultdict(int)
+    for e, lat in cache_endpoints[c]:
+        for v, count in ep_reqs[e]:
+            b1, b1c, b2 = state[v, e]
+            without_c = b2 if b1c == c else b1
+            if lat < without_c:
+                gain[v] += (without_c - lat) * count
+    return gain
+
+
+def prepare_optimization(C, endpoints, requests):
+    counts, _ = _aggregate_requests(requests)
+    ep_reqs, cache_endpoints, neighbors = build_structures(C, endpoints, counts)
+    return counts, ep_reqs, cache_endpoints, neighbors
+
+
+def fractional_bound(items, capacity):
+    ordered = sorted(items, key=lambda t: t[1] / t[2], reverse=True)
+    total, cap = 0.0, capacity
+    for _v, g, s in ordered:
+        if s <= cap:
+            total += g
+            cap -= s
+        else:
+            total += g * cap / s
+            break
+    return total
+
+
+def knapsack_dp(items, capacity):
+    n = len(items)
+    dp = np.zeros(capacity + 1, dtype=np.int64)
+    keep = np.zeros((n, capacity + 1), dtype=bool)
+    for i, (_v, g, s) in enumerate(items):
+        if s > capacity:
+            continue
+        new = dp[: capacity + 1 - s] + g
+        better = new > dp[s:]
+        keep[i, s:] = better
+        dp[s:] = np.where(better, new, dp[s:])
+    chosen = set()
+    cap = capacity
+    for i in range(n - 1, -1, -1):
+        if cap >= 0 and keep[i, cap]:
+            v, _g, s = items[i]
+            chosen.add(v)
+            cap -= s
+    return chosen, int(dp[capacity])
+
+
+def knapsack_greedy(items, capacity):
+    ordered = sorted(items, key=lambda t: t[1] / t[2], reverse=True)
+    chosen, cap, value = set(), capacity, 0
+    for v, g, s in ordered:
+        if 0 < s <= cap:
+            chosen.add(v)
+            cap -= s
+            value += g
+    return chosen, value
+
+
+def _real_value(chosen, items, capacity):
+    by_id = {v: (g, s) for v, g, s in items}
+    ordered = sorted(
+        chosen,
+        key=lambda v: by_id[v][0] / by_id[v][1] if by_id[v][1] else 0,
+        reverse=True,
+    )
+    selected, cap, value = set(), capacity, 0
+    for v in ordered:
+        g, s = by_id[v]
+        if 0 < s <= cap:
+            selected.add(v)
+            cap -= s
+            value += g
+    for v, g, s in sorted(items, key=lambda t: t[1] / t[2], reverse=True):
+        if v not in selected and 0 < s <= cap:
+            selected.add(v)
+            cap -= s
+            value += g
+    return selected, value
+
+
+def _size_gcd(items, capacity):
+    g = int(capacity)
+    for _v, _gain, s in items:
+        if 0 < s <= capacity:
+            g = math.gcd(g, int(s))
+            if g == 1:
+                return 1
+    return max(1, g)
+
+
+def knapsack(items, capacity, dp_max_cap=20_000):
+    if not items or capacity <= 0:
+        return set(), 0
+    if sum(s for _v, _g, s in items) <= capacity:
+        return {v for v, g, s in items}, sum(g for v, g, s in items)
+
+    gcd = _size_gcd(items, capacity)
+    if gcd > 1:
+        capacity = capacity // gcd
+        items = [(v, g, s // gcd) for v, g, s in items]
+
+    n = len(items)
+    if capacity <= dp_max_cap and n * (capacity + 1) <= MAX_DP_CELLS:
+        return knapsack_dp(items, capacity)
+
+    scale = max(1, (capacity + dp_max_cap - 1) // dp_max_cap)
+    scaled_cap = max(1, capacity // scale)
+    scaled = [(v, g, max(1, s // scale)) for v, g, s in items]
+    if len(scaled) * (scaled_cap + 1) > MAX_DP_CELLS:
+        return knapsack_greedy(items, capacity)
+    chosen, _ = knapsack_dp(scaled, scaled_cap)
+    return _real_value(chosen, items, capacity)
+
+
+def solve_cache_seq(
+    C, capacity, video_sizes, endpoints, requests, cfg=None, deadline=None, reverse=False
+):
+    """Remplit chaque cache une fois, depuis vide."""
+    cfg = cfg or {}
+    prep = prepare_optimization(C, endpoints, requests)
+    counts, ep_reqs, cache_endpoints, _ = prep
+    cache_videos = [set() for _ in range(C)]
+    state = build_best_state(endpoints, counts, cache_videos)
+    # reverse=False : plus connectes d'abord ; reverse=True : moins d'abord (utile sur 01)
+    order = sorted(range(C), key=lambda c: len(cache_endpoints[c]), reverse=not reverse)
+
+    for c in order:
+        if deadline is not None and time.time() >= deadline:
+            break
+        gain = compute_gain(c, cache_endpoints, ep_reqs, state)
+        items = [
+            (v, g, video_sizes[v])
+            for v, g in gain.items()
+            if g > 0 and 0 < video_sizes[v] <= capacity
+        ]
+        if not items:
+            continue
+        chosen, _ = knapsack(items, capacity, dp_max_cap=cfg.get("dp_max_cap", 20_000))
+        if not chosen:
+            continue
+        cache_videos[c] = chosen
+        update_best_state(c, chosen, endpoints, cache_endpoints, counts, cache_videos, state)
+    return cache_videos
+
+
+def optimize_caches(
+    cache_videos,
+    C,
+    capacity,
+    video_sizes,
+    endpoints,
+    requests=None,
+    verbose=False,
+    prep=None,
+    deadline=None,
+    cfg=None,
+    time_limit=None,
+):
+    """Coordinate ascent sac a dos. Compatible generate_contest (requests en 6e arg)."""
+    if prep is None:
+        if requests is None:
+            raise ValueError("optimize_caches needs requests or prep")
+        prep = prepare_optimization(C, endpoints, requests)
+    if deadline is None:
+        deadline = time.time() + (time_limit if time_limit is not None else 20.0)
+    cfg = cfg or {}
+
+    counts, ep_reqs, cache_endpoints, neighbors = prep
+    state = build_best_state(endpoints, counts, cache_videos)
+    dirty = set(c for c in range(C) if cache_endpoints[c])
+    improved = 0
+
+    while dirty and time.time() < deadline:
+        batch = list(dirty)
+        random.shuffle(batch)
+        for c in batch:
+            if time.time() >= deadline:
+                break
+            if c not in dirty:
+                continue
+            dirty.discard(c)
+
+            gain = compute_gain(c, cache_endpoints, ep_reqs, state)
+            items = [
+                (v, g, video_sizes[v])
+                for v, g in gain.items()
+                if g > 0 and 0 < video_sizes[v] <= capacity
+            ]
+            if not items:
+                continue
+            current = sum(gain.get(v, 0) for v in cache_videos[c])
+
+            if sum(s for _v, _g, s in items) <= capacity:
+                new_set = {v for v, _g, _s in items}
+                value = sum(g for _v, g, _s in items)
+            else:
+                if fractional_bound(items, capacity) <= current:
+                    continue
+                max_items = cfg.get("knapsack_max_items")
+                if max_items is not None and len(items) > max_items:
+                    items.sort(key=lambda t: t[1] / t[2], reverse=True)
+                    items = items[:max_items]
+                new_set, value = knapsack(items, capacity, dp_max_cap=cfg.get("dp_max_cap", 20_000))
+
+            if value > current:
+                changed = cache_videos[c] ^ new_set
+                cache_videos[c] = new_set
+                update_best_state(
+                    c, changed, endpoints, cache_endpoints, counts, cache_videos, state
+                )
+                improved += 1
+                dirty.update(neighbors[c])
+
+    _explain(verbose, f"  sac a dos : {improved} caches ameliores")
+    return cache_videos
+
+
+def _delta_add(c, v, cache_endpoints, counts, state):
+    total = 0
+    for e, lat in cache_endpoints[c]:
+        key = (v, e)
+        if key not in counts:
+            continue
+        b1, _b1c, _b2 = state[key]
+        if lat < b1:
+            total += (b1 - lat) * counts[key]
+    return total
+
+
+def _apply_add(c, v, cache_videos, remaining, video_sizes, endpoints, cache_endpoints, counts, state):
+    cache_videos[c].add(v)
+    remaining[c] -= video_sizes[v]
+    update_best_state(c, {v}, endpoints, cache_endpoints, counts, cache_videos, state)
+
+
+def _apply_remove(c, v, cache_videos, remaining, video_sizes, endpoints, cache_endpoints, counts, state):
+    cache_videos[c].discard(v)
+    remaining[c] += video_sizes[v]
+    update_best_state(c, {v}, endpoints, cache_endpoints, counts, cache_videos, state)
+
+
+def local_search(
+    cache_videos, C, capacity, video_sizes, endpoints, requests, prep, deadline, verbose=False
+):
+    """Trous + promotion + echanges voisins ; coup garde seulement si score monte."""
+    _phase(verbose, 5, "RECHERCHE LOCALE")
+    if time.time() >= deadline:
+        return cache_videos
+
+    counts, ep_reqs, cache_endpoints, neighbors = prep
+
+    def clone(sol):
+        return [set(vs) for vs in sol]
+
+    def rebuild(sol):
+        st = build_best_state(endpoints, counts, sol)
+        rem = [capacity - sum(video_sizes[v] for v in sol[c]) for c in range(C)]
+        return st, rem
+
+    best = clone(cache_videos)
+    best_score = calculate_score(endpoints, requests, best)
+    cache_videos = clone(best)
+    state, remaining = rebuild(cache_videos)
+    accepted = 0
+
+    def restore():
+        nonlocal cache_videos, state, remaining
+        cache_videos = clone(best)
+        state, remaining = rebuild(cache_videos)
+
+    def accept():
+        nonlocal best_score, best, accepted
+        sc = calculate_score(endpoints, requests, cache_videos)
+        if sc > best_score:
+            best_score = sc
+            best = clone(cache_videos)
+            accepted += 1
+            return True
+        restore()
+        return False
+
+    # Trous
+    for c in range(C):
+        if time.time() >= deadline or remaining[c] <= 0:
+            continue
+        items = []
+        for v, g in compute_gain(c, cache_endpoints, ep_reqs, state).items():
+            size = video_sizes[v]
+            if v not in cache_videos[c] and g > 0 and 0 < size <= remaining[c]:
+                items.append((g / size, v, size))
+        items.sort(reverse=True)
+        for _d, v, size in items[:12]:
+            if time.time() >= deadline or size > remaining[c] or v in cache_videos[c]:
+                continue
+            _apply_add(c, v, cache_videos, remaining, video_sizes, endpoints, cache_endpoints, counts, state)
+            if not accept():
+                break
+
+    # Promotion
+    for c in range(C):
+        if time.time() >= deadline:
+            break
+        for v in list(cache_videos[c]):
+            if time.time() >= deadline:
+                break
+            size = video_sizes[v]
+            best_c2, best_g, seen = None, 0, set()
+            for e, lat in cache_endpoints[c]:
+                if (v, e) not in counts:
+                    continue
+                for c2, lat2 in endpoints[e]["caches"].items():
+                    if c2 == c or c2 in seen or v in cache_videos[c2]:
+                        continue
+                    seen.add(c2)
+                    if remaining[c2] < size or lat2 >= lat:
+                        continue
+                    g = _delta_add(c2, v, cache_endpoints, counts, state)
+                    if g > best_g:
+                        best_g, best_c2 = g, c2
+            if best_c2 is None:
+                continue
+            _apply_add(best_c2, v, cache_videos, remaining, video_sizes, endpoints, cache_endpoints, counts, state)
+            accept()
+
+    # Echanges voisins
+    pairs = [(c1, c2) for c1 in range(C) for c2 in neighbors[c1] if c2 > c1]
+    random.shuffle(pairs)
+    for c1, c2 in pairs:
+        if time.time() >= deadline:
+            break
+        vids1, vids2 = list(cache_videos[c1]), list(cache_videos[c2])
+        if not vids1 or not vids2:
+            continue
+        random.shuffle(vids1)
+        random.shuffle(vids2)
+        got = False
+        for v in vids1[:14]:
+            if got or time.time() >= deadline:
+                break
+            sv = video_sizes[v]
+            for w in vids2[:14]:
+                if v == w or w in cache_videos[c1] or v in cache_videos[c2]:
+                    continue
+                sw = video_sizes[w]
+                if sv > remaining[c2] + sw or sw > remaining[c1] + sv:
+                    continue
+                _apply_remove(c1, v, cache_videos, remaining, video_sizes, endpoints, cache_endpoints, counts, state)
+                _apply_remove(c2, w, cache_videos, remaining, video_sizes, endpoints, cache_endpoints, counts, state)
+                if sv <= remaining[c2]:
+                    _apply_add(c2, v, cache_videos, remaining, video_sizes, endpoints, cache_endpoints, counts, state)
+                if sw <= remaining[c1]:
+                    _apply_add(c1, w, cache_videos, remaining, video_sizes, endpoints, cache_endpoints, counts, state)
+                if accept():
+                    got = True
+                    break
+                break
+
+    _explain(verbose, f"  +{accepted} coups, score={best_score}")
+    return best
+
 
 def write_output(dest, cache_videos, verbose=False):
-    _phase(verbose, 4, "ON ECRIT LE RESULTAT")
-    used_caches = [
-        (cache_id, videos)
-        for cache_id, videos in enumerate(cache_videos)
-        if videos
-    ]
-    _explain(verbose, f"  {len(used_caches)} caches ont recu des videos")
-    for cache_id, videos in used_caches:
-        liste = " ".join(map(str, sorted(videos)))
-        _explain(verbose, f"  cache {cache_id} : {liste}")
-
+    _phase(verbose, 6, "ECRITURE")
+    used = [(c, vs) for c, vs in enumerate(cache_videos) if vs]
     close = False
     if dest is sys.stdout or dest == "-":
         file = sys.stdout
@@ -461,110 +624,108 @@ def write_output(dest, cache_videos, verbose=False):
     else:
         file = open(dest, "w", encoding="utf-8", newline="\n")
         close = True
-
     try:
-        file.write(f"{len(used_caches)}\n")
-        for cache_id, videos in used_caches:
-            video_list = " ".join(map(str, sorted(videos)))
-            file.write(f"{cache_id} {video_list}\n")
+        file.write(f"{len(used)}\n")
+        for cache_id, videos in used:
+            file.write(f"{cache_id} {' '.join(map(str, sorted(videos)))}\n")
         file.flush()
     finally:
         if close:
             file.close()
 
 
-def run_all():
-    from score import calculate_score
+def solve_instance(source, dest=None, verbose=False, time_limit=None):
+    started = time.time()
+    budget = TOTAL_TIME_LIMIT if time_limit is None else time_limit
+    V, E, R, C, capacity, video_sizes, endpoints, requests = read_input(source)
+    cfg = choose_params(V, E, R, C, capacity)
+    deadline = started + budget
 
-    instances = [
-        "me_at_the_zoo",
-        "videos_worth_spreading",
-        "trending_today",
-        "kittens",
-    ]
+    _phase(verbose, 1, "LECTURE")
+    _explain(verbose, f"  V={V} E={E} R={R} C={C} X={capacity}")
+    _explain(verbose, f"  cache_seq={cfg['cache_seq']} dpX={cfg['dp_max_cap']}")
 
-    total = 0
-    _print_regle(True)
-    for name in instances:
-        input_filename = f"{name}.in"
-        output_filename = f"{name}.out"
-        print(f"=== {name} ===")
-        started = time.time()
+    # 1) greedy
+    start = solve(C, capacity, video_sizes, endpoints, requests, verbose=verbose)
+    score_g = calculate_score(endpoints, requests, start)
 
-        (
-            V, E, R, C, capacity, video_sizes, endpoints, requests
-        ) = read_input(input_filename)
+    # 2) cache-seq si utile (les 2 ordres), on garde le meilleur depart
+    if cfg["cache_seq"]:
+        for reverse in (False, True):
+            if time.time() >= deadline:
+                break
+            seq = solve_cache_seq(
+                C, capacity, video_sizes, endpoints, requests,
+                cfg=cfg, deadline=deadline, reverse=reverse,
+            )
+            score_seq = calculate_score(endpoints, requests, seq)
+            _explain(verbose, f"  cache-seq reverse={reverse} -> {score_seq}")
+            if score_seq > score_g:
+                start = seq
+                score_g = score_seq
 
+    # 3) sac a dos (1 seed)
+    prep = prepare_optimization(C, endpoints, requests)
+    ls_deadline = deadline
+    knap_deadline = deadline - budget * cfg["ls_share"]
+    work = [set(v) for v in start]
+    if time.time() < knap_deadline:
+        random.seed(0)
+        work = optimize_caches(
+            work, C, capacity, video_sizes, endpoints,
+            prep=prep, deadline=knap_deadline, verbose=verbose, cfg=cfg,
+        )
+
+    # 4) recherche locale
+    work = local_search(
+        work, C, capacity, video_sizes, endpoints, requests, prep,
+        deadline=ls_deadline, verbose=verbose,
+    )
+    score = calculate_score(endpoints, requests, work)
+
+    if dest is not None:
+        write_output(dest, work, verbose=verbose)
+
+    return {
+        "V": V, "E": E, "R": R, "C": C, "X": capacity,
+        "greedy": score_g, "score": score, "elapsed": time.time() - started,
+    }
+
+
+def run_local(folder="_local", time_limit=90.0):
+    folder = Path(folder)
+    paths = sorted(folder.glob("instance*.txt"))
+    print(f"{'fichier':18} {'greedy':>10} {'final':>10} {'sec':>7}")
+    print("-" * 50)
+    for path in paths:
+        info = solve_instance(str(path), str(path.with_suffix(".out")), False, time_limit)
         print(
-            f"  V={V} E={E} R={R} C={C} X={capacity} "
-            f"({time.time() - started:.1f}s lecture)"
+            f"{path.name:18} {info['greedy']:10d} {info['score']:10d} "
+            f"{info['elapsed']:6.1f}s"
         )
-
-        cache_videos = solve(
-            C, capacity, video_sizes, endpoints, requests, verbose=True
-        )
-        write_output(output_filename, cache_videos, verbose=True)
-        score = calculate_score(endpoints, requests, cache_videos)
-        elapsed = time.time() - started
-        total += score
-        print(f"  score = {score:,}  ({elapsed:.1f}s)".replace(",", " "))
-        print()
-
-    print(f"Total : {total:,}".replace(",", " "))
 
 
 def main():
-    if len(sys.argv) == 2 and sys.argv[1] == "--all":
-        run_all()
+    if len(sys.argv) >= 2 and sys.argv[1] == "--local":
+        limit = float(sys.argv[2]) if len(sys.argv) >= 3 else 90.0
+        run_local("_local", time_limit=limit)
         return
 
-    # Sphere Engine: no arguments, input on stdin, solution on stdout only.
-    judge_mode = len(sys.argv) == 1
-
-    if judge_mode:
-        source = sys.stdin
-        dest = sys.stdout
-        verbose = False
+    started = time.time()
+    if len(sys.argv) == 1:
+        source, dest, verbose = sys.stdin, sys.stdout, False
     elif len(sys.argv) >= 3 and not sys.argv[1].startswith("-"):
-        source = sys.argv[1]
-        dest = sys.argv[2]
-        verbose = True
+        source, dest, verbose = sys.argv[1], sys.argv[2], True
     else:
         print("Utilisation : python main.py fichier.in fichier.out", file=sys.stderr)
-        print("              python main.py --all", file=sys.stderr)
-        print("              python main.py   (stdin → stdout)", file=sys.stderr)
+        print("              python main.py --local [secondes]", file=sys.stderr)
         return
 
-    (
-        V,
-        E,
-        R,
-        C,
-        capacity,
-        video_sizes,
-        endpoints,
-        requests
-    ) = read_input(source)
-
-    _print_regle(verbose)
-
-    _phase(verbose, 1, "ON LIT LE FICHIER")
-    _explain(verbose, f"  {V} videos, {E} quartiers (endpoints), {R} demandes")
-    _explain(verbose, f"  {C} caches, {capacity} Mo chacun")
-
-    cache_videos = solve(
-        C,
-        capacity,
-        video_sizes,
-        endpoints,
-        requests,
-        verbose=verbose,
-    )
-
-    write_output(dest, cache_videos, verbose=verbose)
-
+    info = solve_instance(source, dest, verbose=verbose)
     if verbose:
-        print(f"Solution créée : {dest}", file=sys.stderr)
+        print(f"Score greedy : {info['greedy']}", file=sys.stderr)
+        print(f"Score final  : {info['score']}", file=sys.stderr)
+        print(f"Temps        : {time.time() - started:.2f}s", file=sys.stderr)
 
 
 if __name__ == "__main__":
